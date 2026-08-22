@@ -5,12 +5,16 @@ Razorpay AI Buildathon — **Track 03: AI Revenue Recovery**.
 Detects subscription revenue at risk, decides on an intervention, and executes a
 bounded recovery workflow with stopping rules and a full audit trail.
 
-**Status: Phases 1–2 complete and deployed; Phase 3 partly built.** The trigger
-layer, the policy engine and the orchestrator are live on Cloud Run against
-Cloud SQL, with the worker ticking every 5 minutes via Cloud Scheduler. The
-voice agent's conversation graph, intent model and post-call handling are built
-and tested; the LiveKit runtime that walks the graph is not. See
-[Roadmap](#roadmap).
+**Status: Phases 1, 2, 4 and 5 complete; Phase 3 built but unproven.** The
+trigger layer, policy engine, orchestrator, payment links and batch metrics are
+done, with the webhook service live on Cloud Run against Cloud SQL and the
+worker ticking every 5 minutes via Cloud Scheduler.
+
+The voice agent is written and unit-tested end to end, but **no call has ever
+been placed**: it needs a LiveKit SIP outbound trunk, which requires a telephony
+provider, and for Indian numbers DLT registration. Until then the orchestrator
+uses `LoggingChannel`, which records the intent to call and does not pretend one
+happened. See [Roadmap](#roadmap) and [Known gaps](#known-gaps).
 
 Webhook endpoint:
 `https://dunning-agent-862702522215.asia-south1.run.app/webhooks/razorpay`
@@ -31,6 +35,7 @@ three separate signals:
 | `subscription.halted` | Razorpay gave up retrying | Stamp `halted_at` — the hard escalation trigger |
 | `subscription.charged` | A recurring charge succeeded | Close open cases as recovered |
 | `payment.captured` | Any payment succeeded | Attribute to a case and close it |
+| `payment_link.paid` | A recovery link was paid | Credit the case by `reference_id` |
 
 The second trap: **`payload.payment.entity` contains no `customer_id` and no
 `subscription_id`.** The only linkage a failed payment carries is `invoice_id`.
@@ -151,7 +156,7 @@ uv run python -m app.worker
 2. Dashboard → Settings → Webhooks → add `https://<host>/webhooks/razorpay`.
 3. Set the secret to the same value as `RAZORPAY_WEBHOOK_SECRET` in `.env`.
 4. Subscribe to: `payment.failed`, `payment.captured`, `subscription.pending`,
-   `subscription.halted`, `subscription.charged`.
+   `subscription.halted`, `subscription.charged`, `payment_link.paid`.
 
 ### Local smoke test
 
@@ -173,7 +178,7 @@ resolve the subscription.
 uv run pytest
 ```
 
-97 tests. The signature, policy and conversation-graph tests are pure unit tests;
+163 tests. The signature, policy and conversation-graph tests are pure unit tests;
 the rest need the Postgres container and are skipped automatically if it is not
 reachable.
 
@@ -243,9 +248,10 @@ instance that cannot reach Cloud SQL.
 - [~] **Phase 3** — Conversation graph, intent model, `voice_calls`, post-call
       outcome handling **done**; the LiveKit runtime that walks the graph and
       the SIP dispatch are **not**
-- [ ] **Phase 4** — Razorpay Payment Links for the `retry_now` intent, recovery
-      attribution
-- [ ] **Phase 5** — Batch metrics: cases, ₹ at risk, ₹ recovered, recovery rate
+- [x] **Phase 4** — Razorpay Payment Links for the `retry_now` intent, dual-key
+      recovery attribution
+- [x] **Phase 5** — Batch metrics: cases, ₹ at risk, ₹ recovered, recovery rate
+      (`uv run python -m app.report`)
 
 ## Known gaps
 
