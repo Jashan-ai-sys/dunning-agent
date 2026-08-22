@@ -136,3 +136,35 @@ class RecoveryAction(Base, TimestampMixin):
     metadata_json: Mapped[dict | None] = mapped_column("metadata", JSONB)
 
     case: Mapped[RecoveryCase] = relationship(back_populates="actions")
+
+
+class VoiceCall(Base, TimestampMixin):
+    """One outbound call attempt against a recovery case.
+
+    Separate from ``recovery_actions`` on purpose: the audit trail records that
+    a call happened, this records what the call *was* -- room, duration,
+    transcript, where the conversation graph ended up. Metrics on answer rate
+    and intent mix come from here.
+    """
+
+    __tablename__ = "voice_calls"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    recovery_case_id: Mapped[int] = mapped_column(
+        BigInteger, ForeignKey("recovery_cases.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False, default="livekit")
+    room_name: Mapped[str | None] = mapped_column(String(128), index=True)
+    call_id: Mapped[str | None] = mapped_column(String(128))
+    # The number actually dialled, so the audit trail stands on its own even if
+    # the customer record is later corrected.
+    dialled_number: Mapped[str | None] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="initiated")
+    answered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_seconds: Mapped[int | None] = mapped_column(Integer)
+    detected_intent: Mapped[str | None] = mapped_column(String(32))
+    #: Terminal node the conversation graph reached.
+    final_node_id: Mapped[str | None] = mapped_column(String(64))
+    transcript: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)

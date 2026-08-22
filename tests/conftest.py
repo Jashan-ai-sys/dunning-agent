@@ -21,6 +21,7 @@ from app.db import SessionLocal, engine  # noqa: E402
 from app.models import Base  # noqa: E402
 
 TABLES = [
+    "voice_calls",
     "recovery_actions",
     "recovery_cases",
     "payments",

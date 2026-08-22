@@ -128,7 +128,7 @@ uv run alembic upgrade head
 
 ```bash
 uv run uvicorn app.main:app --reload
-curl http://localhost:8000/healthz
+curl http://localhost:8000/health
 ```
 
 The worker runs as a separate process:
@@ -191,7 +191,7 @@ gcloud run deploy dunning-agent \
   --set-secrets "RAZORPAY_KEY_SECRET=razorpay-key-secret:latest,RAZORPAY_WEBHOOK_SECRET=razorpay-webhook-secret:latest"
 ```
 
-`/healthz` does a real database round-trip so Cloud Run will not route to an
+`/health` does a real database round-trip so Cloud Run will not route to an
 instance that cannot reach Cloud SQL.
 
 ## Roadmap

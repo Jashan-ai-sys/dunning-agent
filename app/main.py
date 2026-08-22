@@ -16,10 +16,15 @@ app = FastAPI(title="Dunning Agent", version="0.1.0")
 app.include_router(webhooks_router)
 
 
-@app.get("/healthz")
-async def healthz() -> dict[str, str]:
+@app.get("/health")
+async def health() -> dict[str, str]:
     """Liveness plus a real database round-trip, so Cloud Run does not route to
-    an instance that cannot reach Cloud SQL."""
+    an instance that cannot reach Cloud SQL.
+
+    Deliberately not ``/healthz``: Google's front end intercepts that exact path
+    on ``*.run.app`` and answers 404 itself, so the request never reaches the
+    container.
+    """
     async with engine.connect() as conn:
         await conn.execute(text("SELECT 1"))
     return {"status": "ok"}

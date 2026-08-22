@@ -32,3 +32,13 @@ class ActionType(StrEnum):
 
 # Razorpay subscription statuses we care about for recovery.
 SUBSCRIPTION_AT_RISK = {"pending", "halted"}
+
+
+class CallStatus(StrEnum):
+    """Lifecycle of one outbound call attempt."""
+
+    INITIATED = "initiated"
+    ANSWERED = "answered"
+    COMPLETED = "completed"
+    NO_ANSWER = "no_answer"
+    FAILED = "failed"
