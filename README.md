@@ -5,9 +5,15 @@ Razorpay AI Buildathon — **Track 03: AI Revenue Recovery**.
 Detects subscription revenue at risk, decides on an intervention, and executes a
 bounded recovery workflow with stopping rules and a full audit trail.
 
-**Status: Phases 1–2 complete** — the trigger layer (webhook intake, correlation,
-case creation) and the policy engine + orchestrator (who to contact, when, and
-when to stop) are built and tested. See [Roadmap](#roadmap).
+**Status: Phases 1–2 complete and deployed; Phase 3 partly built.** The trigger
+layer, the policy engine and the orchestrator are live on Cloud Run against
+Cloud SQL, with the worker ticking every 5 minutes via Cloud Scheduler. The
+voice agent's conversation graph, intent model and post-call handling are built
+and tested; the LiveKit runtime that walks the graph is not. See
+[Roadmap](#roadmap).
+
+Webhook endpoint:
+`https://dunning-agent-862702522215.asia-south1.run.app/webhooks/razorpay`
 
 ---
 
@@ -55,7 +61,7 @@ at-least-once redelivery is a backstop rather than the only safety net.
 A separate worker loop drives recovery forward:
 
 ```
-worker tick (every 60s)
+worker tick (every 5 min in prod, 60s locally)
   │
   ├─▶ replay sweep ── re-dispatch envelopes whose handler died
   │
@@ -109,6 +115,7 @@ customer was actually called.
 | `customers` / `subscriptions` / `payments` | Mirrored Razorpay state |
 | `recovery_cases` | One row per recoverable failure — the unit metrics are computed over |
 | `recovery_actions` | Append-only audit trail; never updated, never deleted |
+| `voice_calls` | One call attempt: room, duration, transcript, terminal node, intent |
 
 ## Setup
 
@@ -166,8 +173,9 @@ resolve the subscription.
 uv run pytest
 ```
 
-58 tests. The signature and policy tests are pure unit tests; the rest need the
-Postgres container and are skipped automatically if it is not reachable.
+97 tests. The signature, policy and conversation-graph tests are pure unit tests;
+the rest need the Postgres container and are skipped automatically if it is not
+reachable.
 
 They cover webhook redelivery (no duplicate cases), one-off vs subscription
 failures, the escalation stamp, payment-link attribution via
@@ -182,17 +190,49 @@ stale ones.
 
 ## Deploy (GCP)
 
+Three pieces: a Cloud Run **service** for the webhook, a Cloud Run **job** for
+migrations, and a Cloud Run **job on a Cloud Scheduler trigger** for the worker.
+The worker cannot be part of the service — Cloud Run scales to zero and would
+kill a long-lived background loop.
+
+The connection string is stored whole in Secret Manager rather than assembled
+from a plaintext env var, so the database password never appears in the Cloud
+Run config or in shell history.
+
 ```bash
-gcloud run deploy dunning-agent \
-  --source . \
-  --region asia-south1 \
+# 1. the webhook service
+gcloud run deploy dunning-agent --source . \
+  --region asia-south1 --allow-unauthenticated \
   --add-cloudsql-instances PROJECT:REGION:INSTANCE \
-  --set-env-vars "DATABASE_URL=postgresql+asyncpg://USER:PASS@/recovery?host=/cloudsql/PROJECT:REGION:INSTANCE" \
-  --set-secrets "RAZORPAY_KEY_SECRET=razorpay-key-secret:latest,RAZORPAY_WEBHOOK_SECRET=razorpay-webhook-secret:latest"
+  --set-env-vars "RAZORPAY_KEY_ID=rzp_test_xxx,LOG_LEVEL=INFO" \
+  --set-secrets "DATABASE_URL=database-url:latest,\
+RAZORPAY_KEY_SECRET=razorpay-key-secret:latest,\
+RAZORPAY_WEBHOOK_SECRET=razorpay-webhook-secret:latest"
+
+# 2. migrations, as a one-off job off the same image
+gcloud run jobs create dunning-migrate --image "$IMAGE" \
+  --region asia-south1 \
+  --set-cloudsql-instances PROJECT:REGION:INSTANCE \
+  --set-secrets "DATABASE_URL=database-url:latest" \
+  --command alembic --args "upgrade,head"
+gcloud run jobs execute dunning-migrate --wait
+
+# 3. the worker, one tick per invocation, every 5 minutes
+gcloud run jobs create dunning-worker --image "$IMAGE" ... \
+  --command python --args "-m,app.worker,--once"
+gcloud scheduler jobs create http dunning-worker-tick \
+  --schedule "*/5 * * * *" --time-zone Asia/Kolkata \
+  --uri "https://run.googleapis.com/v2/projects/PROJECT/locations/REGION/jobs/dunning-worker:run" \
+  --http-method POST --oauth-service-account-email "$SA"
 ```
 
 `/health` does a real database round-trip so Cloud Run will not route to an
 instance that cannot reach Cloud SQL.
+
+> **Not `/healthz`.** Google's front end intercepts that exact path on
+> `*.run.app` and answers 404 itself in ~35ms; the request never reaches the
+> container. `/healthzz` and `/health` both get through — only `/healthz` does
+> not. Cloud Run still reports the revision as Ready, so this fails silently.
 
 ## Roadmap
 
@@ -200,8 +240,9 @@ instance that cannot reach Cloud SQL.
       invoice correlation, case creation, audit trail
 - [x] **Phase 2** — Policy engine, orchestrator, stopping rules, contact-window
       compliance, replay sweep
-- [ ] **Phase 3** — LiveKit outbound voice agent (Hinglish/Hindi/English), intent
-      capture
+- [~] **Phase 3** — Conversation graph, intent model, `voice_calls`, post-call
+      outcome handling **done**; the LiveKit runtime that walks the graph and
+      the SIP dispatch are **not**
 - [ ] **Phase 4** — Razorpay Payment Links for the `retry_now` intent, recovery
       attribution
 - [ ] **Phase 5** — Batch metrics: cases, ₹ at risk, ₹ recovered, recovery rate
@@ -220,5 +261,15 @@ instance that cannot reach Cloud SQL.
   or dead-letter queue — an event whose handler fails permanently is retried
   every tick. Fine at hackathon volume; it would need a real queue in
   production.
-- **No outbound telephony yet.** LiveKit Cloud alone does not place PSTN calls;
-  that needs a SIP trunk (Twilio/Plivo) wired to LiveKit SIP. Phase 3.
+- **No outbound telephony yet.** The conversation graph, intents and post-call
+  handling are built and tested, but nothing places a call. LiveKit Cloud alone
+  does not do PSTN — that needs a SIP trunk (Twilio/Plivo/Exotel) wired to
+  LiveKit SIP, and for Indian numbers, DLT registration. Until then the
+  orchestrator uses `LoggingChannel`, which records the intent to call and
+  explicitly does **not** pretend a call happened.
+- **The app connects to Cloud SQL as the `postgres` superuser.** A dedicated
+  least-privilege role is the right answer; it was skipped because setting up
+  grants needs a `psql` session the deploy box did not have. The credential
+  lives in Secret Manager, not in the repo, but this is a real shortcut.
+- **No backups on the Cloud SQL instance** (`--no-backup`, zonal) to keep the
+  hackathon cost at the floor. Do not copy that into anything real.
