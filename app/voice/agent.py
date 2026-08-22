@@ -1,0 +1,147 @@
+"""LiveKit voice agent that walks the dunning conversation graph.
+
+Run as its own worker process, separate from the API:
+
+    uv run --group voice python -m app.voice.agent dev
+
+Deliberately thin. Every decision about where the conversation goes lives in
+``walker.py`` and is unit-tested; this module only carries audio in and out and
+translates one tool call into one graph transition. The blast radius of code
+that cannot be tested without a telephony provider is kept as small as possible.
+
+Stack: Sarvam STT (Indian languages, streaming), Gemini 2.5 Flash, Cartesia TTS.
+"""
+
+import json
+import logging
+
+from livekit import agents, api
+from livekit.agents import Agent, AgentServer, AgentSession, RunContext, function_tool
+from livekit.plugins import cartesia, google, sarvam, silero
+
+from app.config import get_settings
+from app.voice.flow import DUNNING_FLOW, language_hint
+from app.voice.walker import GraphWalker, InvalidTransition
+
+logger = logging.getLogger(__name__)
+
+server = AgentServer()
+
+
+class CallState:
+    """Mutable result of one call, read after the session ends."""
+
+    def __init__(self, walker: GraphWalker) -> None:
+        self.walker = walker
+        self.transcript: list[str] = []
+
+    @property
+    def intent(self):
+        return self.walker.intent
+
+    @property
+    def final_node_id(self) -> str:
+        return self.walker.node.id
+
+    def as_transcript(self) -> str:
+        return "\n".join(self.transcript)
+
+
+class NodeAgent(Agent):
+    """One stage of the conversation.
+
+    Reaching a new node hands off to a new instance, so the model is only ever
+    holding the instructions and branches for where it currently is.
+    """
+
+    def __init__(self, state: CallState) -> None:
+        super().__init__(instructions=state.walker.instructions())
+        self._state = state
+
+    async def on_enter(self) -> None:
+        await self.session.generate_reply()
+        if self._state.walker.finished:
+            logger.info(
+                "call finished at %s with intent %s",
+                self._state.final_node_id,
+                self._state.intent,
+            )
+            # Let the closing line play out before tearing the room down.
+            await self.session.drain()
+            await self.session.aclose()
+
+    @function_tool
+    async def transition(self, context: RunContext, label: str) -> str:
+        """Move the conversation to the next stage.
+
+        Call this only when the customer's position is clear. ``label`` must be
+        one of the labels listed in your instructions.
+        """
+        try:
+            self._state.walker.transition(label)
+        except InvalidTransition as exc:
+            # Hand the error back to the model rather than failing the call --
+            # it can pick a valid label or ask a clarifying question.
+            logger.warning("rejected transition %r: %s", label, exc)
+            return str(exc)
+
+        logger.info("transition %s -> %s", label, self._state.walker.node.id)
+        return NodeAgent(self._state)
+
+
+def build_session() -> AgentSession:
+    settings = get_settings()
+    tts_kwargs = {"voice": settings.cartesia_voice} if settings.cartesia_voice else {}
+    return AgentSession(
+        stt=sarvam.STT(model=settings.sarvam_stt_model, mode="transcribe", flush_signal=True),
+        llm=google.LLM(model=settings.gemini_model),
+        tts=cartesia.TTS(**tts_kwargs),
+        vad=silero.VAD.load(),
+        turn_detection="stt",
+    )
+
+
+@server.rtc_session(agent_name=get_settings().livekit_agent_name)
+async def dunning_session(ctx: agents.JobContext) -> None:
+    """Entry point. Job metadata carries the case context and the number."""
+    settings = get_settings()
+    metadata = json.loads(ctx.job.metadata or "{}")
+
+    call_context = {
+        "company_name": metadata.get("company_name", settings.company_name),
+        "customer_name": metadata.get("customer_name", "there"),
+        "amount_rupees": metadata.get("amount_rupees", "0"),
+        "failure_reason": metadata.get("failure_reason", "the bank declined it"),
+        "language_hint": language_hint(metadata.get("preferred_language")),
+    }
+    # Raises before the phone rings if the context is incomplete, rather than
+    # reading a literal "{customer_name}" down the line.
+    state = CallState(GraphWalker(DUNNING_FLOW, call_context))
+
+    session = build_session()
+    await session.start(room=ctx.room, agent=NodeAgent(state))
+
+    phone = metadata.get("phone")
+    if phone:
+        await _dial(ctx, phone, settings.livekit_sip_trunk_id)
+
+
+async def _dial(ctx: agents.JobContext, phone: str, trunk_id: str) -> None:
+    """Place the outbound leg. The agent is already in the room when it rings."""
+    if not trunk_id:
+        raise RuntimeError(
+            "LIVEKIT_SIP_TRUNK_ID is not set; an outbound trunk must exist to dial PSTN"
+        )
+    await ctx.api.sip.create_sip_participant(
+        api.CreateSIPParticipantRequest(
+            room_name=ctx.room.name,
+            sip_trunk_id=trunk_id,
+            sip_call_to=phone,
+            participant_identity="customer",
+            wait_until_answered=True,
+        )
+    )
+
+
+if __name__ == "__main__":
+    agents.cli.run_app(server)

@@ -16,6 +16,15 @@ dependencies = [
 ]
 
 [dependency-groups]
+# Not installed by default: the webhook service's container has no need for
+# the voice stack, and these pull in onnxruntime and friends.
+voice = [
+    "livekit-agents[silero,turn-detector]~=1.5",
+    "livekit-plugins-sarvam",
+    "livekit-plugins-google",
+    "livekit-plugins-cartesia",
+    "livekit-api",
+]
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",

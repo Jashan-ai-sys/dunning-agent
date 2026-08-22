@@ -31,7 +31,27 @@ class Settings(BaseSettings):
     worker_interval_seconds: int = 60
     worker_batch_size: int = 50
 
+    # --- Voice ---
+    livekit_url: str = ""
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
+    livekit_agent_name: str = "dunning-agent"
+    # Created in LiveKit against a SIP provider (Twilio/Plivo/Exotel). Without
+    # it there is no way to dial a phone number.
+    livekit_sip_trunk_id: str = ""
+    # Name the agent introduces itself with.
+    company_name: str = "Acme"
+    # Sarvam / Gemini / Cartesia keys are read from the environment by their
+    # own plugins (SARVAM_API_KEY, GOOGLE_API_KEY, CARTESIA_API_KEY).
+    sarvam_stt_model: str = "saaras:v3"
+    gemini_model: str = "gemini-2.5-flash"
+    cartesia_voice: str = ""
+
     log_level: str = "INFO"
+
+    @property
+    def livekit_configured(self) -> bool:
+        return bool(self.livekit_url and self.livekit_api_key and self.livekit_api_secret)
 
 
 @lru_cache
