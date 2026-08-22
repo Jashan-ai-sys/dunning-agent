@@ -35,6 +35,18 @@ class RazorpayClient:
             raise RazorpayError(response.status_code, response.text)
         return response.json()
 
+    async def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+        async with httpx.AsyncClient(timeout=self._timeout) as client:
+            response = await client.post(f"{self._base}{path}", json=payload, auth=self._auth)
+        if response.status_code >= 400:
+            raise RazorpayError(response.status_code, response.text)
+        return response.json()
+
+    async def create_payment_link(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Create a standard payment link. Returns the link entity, including
+        ``id`` and ``short_url``."""
+        return await self._post("/payment_links", payload)
+
     async def fetch_invoice(self, invoice_id: str) -> dict[str, Any]:
         """Invoices carry the subscription_id and customer_id a payment lacks."""
         return await self._get(f"/invoices/{invoice_id}")

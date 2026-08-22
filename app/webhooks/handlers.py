@@ -4,7 +4,8 @@ Note on event names: Razorpay has no ``subscription.charged.failed`` event. A
 failed recurring charge surfaces as ``payment.failed`` (the attempt) plus
 ``subscription.pending`` (Razorpay is retrying) and eventually
 ``subscription.halted`` (Razorpay gave up). Those three are our revenue-at-risk
-triggers; ``subscription.charged`` and ``payment.captured`` close the loop.
+triggers; ``subscription.charged``, ``payment.captured`` and
+``payment_link.paid`` close the loop.
 """
 
 import logging
@@ -16,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import ActionType
 from app.models import Customer, RecoveryCase, Subscription
+from app.payment_links import case_id_from_reference
 from app.razorpay.client import RazorpayClient
 from app.store import (
     get_open_cases_for_subscription,
@@ -31,6 +33,16 @@ from app.store import (
 logger = logging.getLogger(__name__)
 
 Handler = Callable[[AsyncSession, dict[str, Any], RazorpayClient], Awaitable[None]]
+
+
+def _note(entity: dict[str, Any], key: str) -> Any:
+    """Read one note off an entity.
+
+    Razorpay sends ``notes`` as an object when set and, per its own docs, as an
+    empty *list* when not -- so this cannot assume a dict.
+    """
+    notes = entity.get("notes")
+    return notes.get(key) if isinstance(notes, dict) else None
 
 
 async def _resolve_invoice_context(
@@ -187,8 +199,7 @@ async def handle_payment_captured(
     the precise attribution path. Otherwise fall back to the invoice linkage.
     """
     payment = event["payload"]["payment"]["entity"]
-    notes = payment.get("notes") or {}
-    case_id = notes.get("recovery_case_id")
+    case_id = _note(payment, "recovery_case_id")
 
     invoice_id = payment.get("invoice_id")
     subscription_id: str | None = None
@@ -208,6 +219,32 @@ async def handle_payment_captured(
 
     if subscription_id:
         await _close_cases_for_subscription(session, subscription_id, payment, event)
+
+
+async def handle_payment_link_paid(
+    session: AsyncSession, event: dict[str, Any], client: RazorpayClient
+) -> None:
+    """A recovery payment link was paid.
+
+    The most reliable attribution path: the link entity carries our own
+    ``reference_id``, a first-class field, rather than depending on notes
+    surviving the hop onto the payment entity.
+    """
+    link = event["payload"]["payment_link"]["entity"]
+    payment = event["payload"]["payment"]["entity"]
+
+    case_id = case_id_from_reference(link.get("reference_id")) or _note(
+        link, "recovery_case_id"
+    )
+
+    await upsert_payment(session, payment)
+
+    case = await _get_case_by_id(session, case_id)
+    if case is None:
+        logger.info("payment link %s is not one of ours; ignoring", link.get("id"))
+        return
+
+    await _record_recovery(session, case, payment, event)
 
 
 async def _get_case_by_id(session: AsyncSession, case_id: Any) -> RecoveryCase | None:
@@ -253,4 +290,5 @@ EVENT_HANDLERS: dict[str, Handler] = {
     "subscription.pending": handle_subscription_pending,
     "subscription.halted": handle_subscription_halted,
     "subscription.charged": handle_subscription_charged,
+    "payment_link.paid": handle_payment_link_paid,
 }

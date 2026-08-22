@@ -114,6 +114,11 @@ class RecoveryCase(Base, TimestampMixin):
     recovered_payment_id: Mapped[str | None] = mapped_column(String(64))
     recovered_amount: Mapped[int | None] = mapped_column(Integer)
     recovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The recovery payment link, if one has been sent. One active link per case
+    # is enough for this workflow; a new attempt reuses or replaces it.
+    payment_link_id: Mapped[str | None] = mapped_column(String(64))
+    payment_link_url: Mapped[str | None] = mapped_column(String(255))
+    payment_link_sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )

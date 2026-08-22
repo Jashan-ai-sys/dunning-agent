@@ -28,6 +28,10 @@ class Settings(BaseSettings):
     contact_window_end_hour: int = 21
     contact_timezone: str = "Asia/Kolkata"
 
+    # Payment links expire so a stale link cannot be paid weeks later against
+    # a case that has since been closed. Razorpay requires at least 15 minutes.
+    payment_link_expiry_hours: int = 48
+
     worker_interval_seconds: int = 60
     worker_batch_size: int = 50
 

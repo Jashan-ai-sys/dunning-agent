@@ -20,6 +20,8 @@ from sqlalchemy import text  # noqa: E402
 from app.db import SessionLocal, engine  # noqa: E402
 from app.models import Base  # noqa: E402
 
+_schema_built = False
+
 TABLES = [
     "voice_calls",
     "recovery_actions",
@@ -57,10 +59,18 @@ async def session():
     asyncpg connections are bound to the loop that opened them, so pooling them
     across pytest-asyncio's per-test loops would fail.
     """
+    global _schema_built
     await _ensure_test_database()
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-        await conn.execute(text(f"TRUNCATE {', '.join(TABLES)} RESTART IDENTITY CASCADE"))
+        if not _schema_built:
+            # Rebuild once per run. create_all does not ALTER an existing table,
+            # so without this a model change silently tests against the old
+            # schema and fails with "column does not exist".
+            await conn.run_sync(Base.metadata.drop_all)
+            await conn.run_sync(Base.metadata.create_all)
+            _schema_built = True
+        else:
+            await conn.execute(text(f"TRUNCATE {', '.join(TABLES)} RESTART IDENTITY CASCADE"))
     try:
         async with SessionLocal() as s:
             yield s

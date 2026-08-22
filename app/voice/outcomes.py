@@ -12,7 +12,8 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants import ActionType, CallStatus
-from app.models import RecoveryCase, VoiceCall
+from app.models import Customer, RecoveryCase, VoiceCall
+from app.payment_links import create_recovery_link
 from app.store import log_action, utcnow
 from app.voice.intents import CallIntent, outcome_for
 
@@ -37,6 +38,9 @@ async def apply_call_result(
     case: RecoveryCase,
     call: VoiceCall,
     result: CallResult,
+    *,
+    customer: Customer | None = None,
+    client=None,
 ) -> None:
     """Record the call and move the case according to the detected intent.
 
@@ -91,3 +95,11 @@ async def apply_call_result(
         logger.warning(
             "case %s needs human review after a disputed charge on call %s", case.id, call.id
         )
+
+    if outcome.send_payment_link and customer is not None and client is not None:
+        # Failing to send the link must not undo the rest of the call record --
+        # the customer still said yes, and the next tick can retry the link.
+        try:
+            await create_recovery_link(session, case, customer, client)
+        except Exception:
+            logger.exception("could not create a payment link for case %s", case.id)

@@ -170,3 +170,71 @@ async def test_transcript_is_evidence_not_input(session):
     await session.refresh(case)
     assert case.status != CaseStatus.RECOVERED
     assert case.recovered_payment_id is None
+
+
+class FakeLinkClient:
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls = 0
+
+    async def create_payment_link(self, payload: dict) -> dict:
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError("razorpay 500")
+        return {
+            "id": "plink_1",
+            "short_url": "https://rzp.io/i/plink_1",
+            "reference_id": payload["reference_id"],
+        }
+
+
+async def test_retry_now_sends_a_payment_link(session):
+    case, call = await seed(session)
+    customer = (await session.execute(select(Customer))).scalar_one()
+    client = FakeLinkClient()
+
+    await apply_call_result(
+        session, case, call, CallResult(intent=CallIntent.RETRY_NOW),
+        customer=customer, client=client,
+    )
+    await session.commit()
+
+    assert client.calls == 1
+    await session.refresh(case)
+    assert case.payment_link_url == "https://rzp.io/i/plink_1"
+    assert ActionType.PAYMENT_LINK_CREATED in await actions_for(session, case.id)
+
+
+async def test_declining_never_sends_a_link(session):
+    case, call = await seed(session)
+    customer = (await session.execute(select(Customer))).scalar_one()
+    client = FakeLinkClient()
+
+    await apply_call_result(
+        session, case, call, CallResult(intent=CallIntent.DECLINED),
+        customer=customer, client=client,
+    )
+    await session.commit()
+
+    assert client.calls == 0
+    await session.refresh(case)
+    assert case.payment_link_id is None
+
+
+async def test_a_failed_link_does_not_lose_the_call_record(session):
+    """The customer still said yes; the next tick can retry the link."""
+    case, call = await seed(session)
+    customer = (await session.execute(select(Customer))).scalar_one()
+
+    await apply_call_result(
+        session, case, call, CallResult(intent=CallIntent.RETRY_NOW),
+        customer=customer, client=FakeLinkClient(fail=True),
+    )
+    await session.commit()
+
+    await session.refresh(call)
+    assert call.detected_intent == CallIntent.RETRY_NOW
+    assert call.ended_at is not None
+    await session.refresh(case)
+    assert case.payment_link_id is None
+    assert ActionType.VOICE_CALL in await actions_for(session, case.id)

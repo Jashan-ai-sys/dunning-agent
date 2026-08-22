@@ -1,0 +1,246 @@
+"""Payment links: the recovery instrument, and how a payment gets attributed."""
+
+import pytest
+from sqlalchemy import func, select
+
+from app.config import Settings
+from app.constants import ActionType, CaseStatus
+from app.models import Customer, RecoveryAction, RecoveryCase
+from app.payment_links import (
+    build_payload,
+    case_id_from_reference,
+    create_recovery_link,
+    reference_id_for,
+)
+from app.webhooks.handlers import handle_payment_captured, handle_payment_link_paid
+from tests.payloads import event, payment_entity
+
+SETTINGS = Settings(company_name="Acme", payment_link_expiry_hours=48)
+
+
+class FakeLinkClient:
+    """Records what would have been sent to Razorpay."""
+
+    def __init__(self, link_id: str = "plink_1") -> None:
+        self.link_id = link_id
+        self.payloads: list[dict] = []
+
+    async def create_payment_link(self, payload: dict) -> dict:
+        self.payloads.append(payload)
+        return {
+            "id": self.link_id,
+            "short_url": f"https://rzp.io/i/{self.link_id}",
+            "reference_id": payload["reference_id"],
+            "status": "created",
+        }
+
+
+async def seed(session, **case_kwargs) -> tuple[RecoveryCase, Customer]:
+    customer = Customer(
+        razorpay_customer_id="cust_1",
+        name="Asha Rao",
+        phone="+919000000000",
+        email="asha@example.com",
+    )
+    session.add(customer)
+    case = RecoveryCase(
+        **{
+            "razorpay_payment_id": "pay_FAIL1",
+            "razorpay_customer_id": "cust_1",
+            "razorpay_subscription_id": "sub_1",
+            "original_amount": 49_900,
+            "status": CaseStatus.IN_PROGRESS,
+            **case_kwargs,
+        }
+    )
+    session.add(case)
+    await session.commit()
+    await session.refresh(case)
+    return case, customer
+
+
+# --- reference ids -----------------------------------------------------
+
+
+def test_reference_id_round_trips():
+    case = RecoveryCase(id=42, razorpay_payment_id="pay_1", original_amount=1)
+    assert case_id_from_reference(reference_id_for(case)) == 42
+
+
+def test_reference_id_fits_razorpay_limit():
+    """Razorpay caps reference_id at 40 characters."""
+    case = RecoveryCase(id=9_999_999_999, razorpay_payment_id="pay_1", original_amount=1)
+    assert len(reference_id_for(case)) <= 40
+
+
+@pytest.mark.parametrize("value", [None, "", "order_123", "recovery-", "recovery-abc"])
+def test_foreign_reference_ids_are_ignored(value):
+    """Someone else's payment link must never credit one of our cases."""
+    assert case_id_from_reference(value) is None
+
+
+# --- payload -----------------------------------------------------------
+
+
+def test_payload_carries_both_attribution_keys(session=None):
+    case = RecoveryCase(id=7, razorpay_payment_id="pay_1", original_amount=49_900)
+    customer = Customer(razorpay_customer_id="c", name="A", phone="+91900", email="a@b.c")
+    payload = build_payload(case, customer, settings=SETTINGS, expire_at=123)
+
+    assert payload["reference_id"] == "recovery-7"
+    assert payload["notes"]["recovery_case_id"] == "7"
+
+
+def test_payload_amount_is_paise_not_rupees():
+    """Razorpay takes the smallest currency unit. Converting here would charge
+    a hundredth of the debt."""
+    case = RecoveryCase(id=1, razorpay_payment_id="pay_1", original_amount=49_900)
+    payload = build_payload(
+        case, Customer(razorpay_customer_id="c"), settings=SETTINGS, expire_at=1
+    )
+    assert payload["amount"] == 49_900
+
+
+def test_payload_omits_customer_block_when_nothing_is_known():
+    """Razorpay rejects an empty customer object."""
+    case = RecoveryCase(id=1, razorpay_payment_id="pay_1", original_amount=100)
+    payload = build_payload(
+        case, Customer(razorpay_customer_id="c"), settings=SETTINGS, expire_at=1
+    )
+    assert "customer" not in payload
+    assert payload["notify"] == {"sms": False, "email": False}
+
+
+# --- creation ----------------------------------------------------------
+
+
+async def test_creating_a_link_records_it_on_the_case(session):
+    case, customer = await seed(session)
+    client = FakeLinkClient()
+
+    link = await create_recovery_link(session, case, customer, client, settings=SETTINGS)
+    await session.commit()
+
+    assert link.short_url.startswith("https://rzp.io/i/")
+    await session.refresh(case)
+    assert case.payment_link_id == "plink_1"
+    assert case.payment_link_url == link.short_url
+    assert case.payment_link_sent_at is not None
+
+    actions = await session.execute(
+        select(RecoveryAction.action_type).where(RecoveryAction.recovery_case_id == case.id)
+    )
+    assert list(actions.scalars()) == [ActionType.PAYMENT_LINK_CREATED]
+
+
+async def test_a_second_request_reuses_the_existing_link(session):
+    """Two links for one debt risks charging the customer twice."""
+    case, customer = await seed(session)
+    client = FakeLinkClient()
+
+    first = await create_recovery_link(session, case, customer, client, settings=SETTINGS)
+    await session.commit()
+    second = await create_recovery_link(session, case, customer, client, settings=SETTINGS)
+    await session.commit()
+
+    assert first.id == second.id
+    assert len(client.payloads) == 1
+    count = await session.execute(select(func.count(RecoveryAction.id)))
+    assert count.scalar_one() == 1
+
+
+async def test_link_creation_does_not_close_the_case(session):
+    """Sending a link is not recovering money."""
+    case, customer = await seed(session)
+    await create_recovery_link(session, case, customer, FakeLinkClient(), settings=SETTINGS)
+    await session.commit()
+
+    await session.refresh(case)
+    assert case.status == CaseStatus.IN_PROGRESS
+    assert case.recovered_amount is None
+
+
+# --- attribution -------------------------------------------------------
+
+
+def link_paid_event(reference_id="recovery-1", notes=None, payment_id="pay_LINK1"):
+    return event(
+        "payment_link.paid",
+        {
+            "payment_link": {
+                "entity": {
+                    "id": "plink_1",
+                    "reference_id": reference_id,
+                    "notes": notes if notes is not None else {},
+                    "status": "paid",
+                }
+            },
+            "payment": {
+                "entity": payment_entity(payment_id, status="captured", invoice_id=None)
+            },
+        },
+    )
+
+
+async def test_link_payment_is_attributed_by_reference_id(session, fake_client):
+    case, _ = await seed(session)
+    await handle_payment_link_paid(
+        session, link_paid_event(reference_id=f"recovery-{case.id}"), fake_client
+    )
+    await session.commit()
+
+    await session.refresh(case)
+    assert case.status == CaseStatus.RECOVERED
+    assert case.recovered_payment_id == "pay_LINK1"
+    assert case.recovered_amount == 49_900
+
+
+async def test_link_payment_falls_back_to_notes(session, fake_client):
+    """Belt and braces: if reference_id is absent, notes still credit the case."""
+    case, _ = await seed(session)
+    await handle_payment_link_paid(
+        session,
+        link_paid_event(reference_id=None, notes={"recovery_case_id": str(case.id)}),
+        fake_client,
+    )
+    await session.commit()
+
+    await session.refresh(case)
+    assert case.status == CaseStatus.RECOVERED
+
+
+async def test_notes_as_empty_list_does_not_crash(session, fake_client):
+    """Razorpay's own docs show notes arriving as [] rather than {}."""
+    case, _ = await seed(session)
+    await handle_payment_link_paid(
+        session, link_paid_event(reference_id=None, notes=[]), fake_client
+    )
+    await session.commit()
+
+    await session.refresh(case)
+    assert case.status == CaseStatus.IN_PROGRESS  # unattributed, but no crash
+
+
+async def test_someone_elses_payment_link_is_ignored(session, fake_client):
+    case, _ = await seed(session)
+    await handle_payment_link_paid(session, link_paid_event(reference_id="order_999"), fake_client)
+    await session.commit()
+
+    await session.refresh(case)
+    assert case.status == CaseStatus.IN_PROGRESS
+
+
+async def test_payment_captured_with_list_notes_does_not_crash(session, fake_client):
+    """The same hazard on the payment.captured path."""
+    case, _ = await seed(session)
+    payload = event(
+        "payment.captured",
+        {"payment": {"entity": payment_entity("pay_X", status="captured", invoice_id=None)}},
+    )
+    payload["payload"]["payment"]["entity"]["notes"] = []
+
+    await handle_payment_captured(session, payload, fake_client)
+    await session.commit()
+
+    await session.refresh(case)
+    assert case.status == CaseStatus.IN_PROGRESS
