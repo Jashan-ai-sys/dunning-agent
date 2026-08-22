@@ -157,7 +157,7 @@ def test_transition_speech_is_rendered_when_present():
     w.transition("identity_confirmed")
     w.transition("acknowledged")
     speech = w.transition_speech("pay_now")
-    assert speech and "link" in speech.lower()
+    assert speech and "लिंक" in speech
 
 
 def test_transition_speech_is_none_when_the_edge_has_no_line():

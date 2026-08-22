@@ -1,9 +1,9 @@
 """The dunning conversation, as a graph.
 
-Hinglish by default -- code-switching between Hindi and English is how most
-Indian customers actually speak, and forcing either pure language makes the call
-sound like a robocall. ``{language_hint}`` sets the opening language from the
-customer's stored preference; after that the model mirrors whatever they use.
+Hindi by default. ``{language_hint}`` sets the opening language from the
+customer's stored preference; from the second turn on the model mirrors whatever
+the customer actually speaks, so an English or Hinglish speaker is never trapped
+in a language they did not choose.
 
 Three rules are baked into the prompts rather than left to the model's
 judgement, because all three are compliance issues rather than style choices:
@@ -70,7 +70,7 @@ GREET = Node(
                 "The person says this is the wrong number, that they are someone else, "
                 "or that they do not know the customer."
             ),
-            speech="Sorry for the trouble, main number check karwa leta hoon.",
+            speech="माफ़ कीजिए, मैं नंबर की जाँच करवा लेता हूँ।",
         ),
     ),
 )
@@ -118,7 +118,7 @@ ASK_INTENT = Node(
             to="pay_now",
             label="pay_now",
             condition="The customer wants to pay now, or agrees to receive a payment link.",
-            speech="Bilkul, main abhi aapko link bhej deta hoon.",
+            speech="बिल्कुल, मैं अभी आपको लिंक भेज देता हूँ।",
         ),
         Edge(
             to="pay_later",
@@ -205,11 +205,17 @@ DUNNING_FLOW = ConversationGraph(
 )
 
 LANGUAGE_HINTS = {
+    "hi": "in simple, everyday Hindi -- Devanagari, not transliterated",
     "hinglish": "in natural Hinglish, mixing Hindi and English the way urban Indians do",
-    "hi": "in simple Hindi",
     "en": "in clear Indian English",
 }
 
+#: Hindi unless a customer record says otherwise. The mirroring rule still
+#: applies from the second turn on, so an English-speaking customer is not
+#: trapped in a language they did not choose.
+DEFAULT_LANGUAGE = "hi"
+
 
 def language_hint(preferred_language: str | None) -> str:
-    return LANGUAGE_HINTS.get(preferred_language or "hinglish", LANGUAGE_HINTS["hinglish"])
+    key = preferred_language or DEFAULT_LANGUAGE
+    return LANGUAGE_HINTS.get(key, LANGUAGE_HINTS[DEFAULT_LANGUAGE])

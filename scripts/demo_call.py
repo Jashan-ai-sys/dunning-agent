@@ -63,7 +63,7 @@ def sample_context() -> dict:
     return {
         "recovery_case_id": 0,
         "customer_name": "Asha",
-        "preferred_language": "hinglish",
+        "preferred_language": "hi",
         "amount_rupees": "499",
         "failure_reason": "your card had insufficient funds",
     }

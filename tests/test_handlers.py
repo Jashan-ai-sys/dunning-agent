@@ -59,7 +59,7 @@ async def test_failure_hydrates_customer_and_subscription(session, fake_client):
     customer = (await session.execute(select(Customer))).scalar_one()
     assert customer.razorpay_customer_id == "cust_1"
     assert customer.phone == "+919000000000"
-    assert customer.preferred_language == "hinglish"
+    assert customer.preferred_language == "hi"
 
     subscription = (await session.execute(select(Subscription))).scalar_one()
     assert subscription.razorpay_subscription_id == "sub_1"

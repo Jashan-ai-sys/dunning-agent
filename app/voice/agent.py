@@ -40,7 +40,7 @@ SAMPLE_CONTEXT = {
     "customer_name": "Asha",
     "amount_rupees": "499",
     "failure_reason": "your card had insufficient funds",
-    "preferred_language": "hinglish",
+    "preferred_language": "hi",
 }
 
 

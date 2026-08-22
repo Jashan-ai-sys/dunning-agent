@@ -257,7 +257,7 @@ def test_every_intent_has_an_outcome():
 
 @pytest.mark.parametrize(
     "preference,expected_fragment",
-    [("hinglish", "Hinglish"), ("hi", "Hindi"), ("en", "English"), (None, "Hinglish")],
+    [("hinglish", "Hinglish"), ("hi", "Hindi"), ("en", "English"), (None, "Hindi")],
 )
 def test_language_hint_follows_the_customer_preference(preference, expected_fragment):
     assert expected_fragment in language_hint(preference)

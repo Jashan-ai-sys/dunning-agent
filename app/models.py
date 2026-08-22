@@ -53,8 +53,9 @@ class Customer(Base, TimestampMixin):
     name: Mapped[str | None] = mapped_column(String(255))
     phone: Mapped[str | None] = mapped_column(String(32))
     email: Mapped[str | None] = mapped_column(String(255))
-    # 'hi' | 'en' | 'hinglish' -- drives the voice agent prompt in Phase 3.
-    preferred_language: Mapped[str] = mapped_column(String(16), nullable=False, default="hinglish")
+    # 'hi' | 'en' | 'hinglish' -- drives the voice agent prompt. Hindi by
+    # default; the agent still mirrors whatever the customer actually speaks.
+    preferred_language: Mapped[str] = mapped_column(String(16), nullable=False, default="hi")
 
 
 class Subscription(Base, TimestampMixin):
