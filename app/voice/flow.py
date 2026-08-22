@@ -2,12 +2,13 @@
 
 Hinglish by default -- code-switching between Hindi and English is how most
 Indian customers actually speak, and forcing either pure language makes the call
-sound like a robocall. ``{language_hint}`` lets a customer's stored preference
-override the default.
+sound like a robocall. ``{language_hint}`` sets the opening language from the
+customer's stored preference; after that the model mirrors whatever they use.
 
-Two rules are baked into the prompts rather than left to the model's judgement,
-because both are compliance issues rather than style choices:
+Three rules are baked into the prompts rather than left to the model's
+judgement, because all three are compliance issues rather than style choices:
 
+* never reveal the amount before identity is confirmed,
 * never argue about a disputed charge -- hand it to a human,
 * never read out card details or ask for them; recovery happens through a
   Razorpay payment link, never over the phone.
@@ -16,13 +17,33 @@ because both are compliance issues rather than style choices:
 from app.voice.graph import ConversationGraph, Edge, Node, NodeKind
 from app.voice.intents import CallIntent
 
-SYSTEM_STYLE = """You are a polite billing assistant for {company_name}, calling
+#: Carried by every node, terminals included. Sarvam runs in `transcribe` mode,
+#: so the model genuinely sees the customer's own language rather than an English
+#: translation -- which is what makes mirroring possible at all.
+LANGUAGE_RULE = """LANGUAGE -- this rule overrides every other instruction:
+Answer in the same language and the same script the customer just used. If their
+words arrive in Hindi, answer in Hindi. In English, answer in English. If they
+mix the two, mix them back the same way. Never move someone to a language they
+did not use, and never reply in a script they did not use. Judge this only from
+what they actually just said, not from their name or where they are calling
+from."""
+
+SYSTEM_STYLE = (
+    """You are a polite billing assistant for {company_name}, calling
 {customer_name} about a subscription payment that failed.
 
-Speak {language_hint}. Keep every turn to one or two short sentences -- this is a
-phone call, not an essay. Never ask for card, CVV, OTP or UPI PIN details; the
-customer pays through a secure link we send, never over the phone. If the
-customer sounds annoyed, stay calm and offer to end the call."""
+"""
+    + LANGUAGE_RULE
+    + """
+
+Open the call {language_hint}, then follow the language rule above for every
+turn after that.
+
+Keep every turn to one or two short sentences -- this is a phone call, not an
+essay. Never ask for card, CVV, OTP or UPI PIN details; the customer pays through
+a secure link we send, never over the phone. If the customer sounds annoyed, stay
+calm and offer to end the call."""
+)
 
 
 GREET = Node(
@@ -128,8 +149,9 @@ PAY_NOW = Node(
     kind=NodeKind.END,
     intent=CallIntent.RETRY_NOW,
     prompt=(
-        "Confirm you are sending a secure payment link right now, tell them it is "
-        "for Rs {amount_rupees}, thank them, and end the call."
+        LANGUAGE_RULE
+        + "\n\nConfirm you are sending a secure payment link right now, tell them it "
+        "is for Rs {amount_rupees}, thank them, and end the call."
     ),
 )
 
@@ -138,8 +160,9 @@ PAY_LATER = Node(
     kind=NodeKind.END,
     intent=CallIntent.RETRY_LATER,
     prompt=(
-        "Acknowledge their preferred time, say you will follow up then, thank them "
-        "and end the call. Do not promise an exact hour."
+        LANGUAGE_RULE
+        + "\n\nAcknowledge their preferred time, say you will follow up then, thank "
+        "them and end the call. Do not promise an exact hour."
     ),
 )
 
@@ -148,8 +171,9 @@ DECLINED = Node(
     kind=NodeKind.END,
     intent=CallIntent.DECLINED,
     prompt=(
-        "Accept their decision without pushing back even once. Confirm they will "
-        "not be called again about this payment, thank them and end the call."
+        LANGUAGE_RULE
+        + "\n\nAccept their decision without pushing back even once. Confirm they "
+        "will not be called again about this payment, thank them and end the call."
     ),
 )
 
@@ -158,8 +182,9 @@ WRONG_NUMBER = Node(
     kind=NodeKind.END,
     intent=CallIntent.WRONG_NUMBER,
     prompt=(
-        "Apologise briefly for the wrong number, say the number will be removed, "
-        "and end the call. Do not reveal any billing details."
+        LANGUAGE_RULE
+        + "\n\nApologise briefly for the wrong number, say the number will be "
+        "removed, and end the call. Do not reveal any billing details."
     ),
 )
 
@@ -168,7 +193,8 @@ DISPUTE = Node(
     kind=NodeKind.END,
     intent=CallIntent.DISPUTE,
     prompt=(
-        "Do not argue and do not try to resolve it. Say a human colleague will "
+        LANGUAGE_RULE
+        + "\n\nDo not argue and do not try to resolve it. Say a human colleague will "
         "review the account and get back to them, thank them and end the call."
     ),
 )

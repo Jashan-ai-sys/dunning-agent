@@ -11,3 +11,4 @@ venv/
 htmlcov/
 *.log
 .DS_Store
+join.html

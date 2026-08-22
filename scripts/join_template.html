@@ -1,0 +1,99 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Dunning agent — call</title>
+<script src="https://cdn.jsdelivr.net/npm/livekit-client/dist/livekit-client.umd.min.js"></script>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; margin: 0; background: #0e0f13; color: #e8e8ea; }
+  main { max-width: 640px; margin: 0 auto; padding: 32px 24px; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .sub { color: #8b8d98; font-size: 13px; margin-bottom: 24px; }
+  button { font: inherit; padding: 10px 20px; border: 0; border-radius: 6px;
+           background: #3b82f6; color: #fff; cursor: pointer; }
+  button:disabled { background: #2a2d36; color: #6b6d78; cursor: default; }
+  #status { margin: 20px 0; padding: 12px 14px; border-radius: 6px;
+            background: #16181f; border-left: 3px solid #3b82f6; font-size: 14px; }
+  #log { margin-top: 20px; font-size: 13px; }
+  .line { padding: 7px 10px; border-radius: 5px; margin-bottom: 6px; }
+  .agent { background: #16222f; }
+  .you { background: #1c1b22; }
+  .who { color: #8b8d98; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  .err { color: #f87171; white-space: pre-wrap; }
+</style>
+<main>
+  <h1>Dunning agent</h1>
+  <div class="sub">__ROOM__ &middot; recovering &#8377;__AMOUNT__ from __CUSTOMER__</div>
+  <button id="go">Connect and talk</button>
+  <div id="status">Not connected.</div>
+  <div id="log"></div>
+</main>
+<script>
+  const URL_ = "__URL__", TOKEN = "__TOKEN__";
+  const statusEl = document.getElementById("status");
+  const logEl = document.getElementById("log");
+  const go = document.getElementById("go");
+
+  const say = (t) => { statusEl.textContent = t; };
+  const line = (who, text, cls) => {
+    const d = document.createElement("div");
+    d.className = "line " + cls;
+    d.innerHTML = '<div class="who">' + who + "</div>" + text;
+    logEl.appendChild(d);
+    d.scrollIntoView({ block: "end" });
+  };
+
+  go.onclick = async () => {
+    go.disabled = true;
+    try {
+      say("Connecting…");
+      const room = new LivekitClient.Room({ adaptiveStream: true });
+
+      room.on(LivekitClient.RoomEvent.TrackSubscribed, (track) => {
+        if (track.kind !== "audio") return;
+        // attach() with no argument builds its own <audio> element. Passing a
+        // container instead silently produces no sound.
+        const el = track.attach();
+        el.autoplay = true;
+        document.body.appendChild(el);
+        el.play().catch(() => say("Browser blocked autoplay — click Connect again."));
+        say("Connected. The agent should speak first — listen.");
+      });
+
+      room.on(LivekitClient.RoomEvent.AudioPlaybackStatusChanged, () => {
+        if (!room.canPlaybackAudio) {
+          say("Audio is blocked by the browser. Click anywhere to allow it.");
+          document.body.addEventListener(
+            "click", () => room.startAudio().then(() => say("Audio enabled.")),
+            { once: true }
+          );
+        }
+      });
+      room.on(LivekitClient.RoomEvent.ParticipantConnected, (p) =>
+        say("Agent joined (" + p.identity + "). Listening…"));
+      room.on(LivekitClient.RoomEvent.Disconnected, () => say("Call ended."));
+      room.on(LivekitClient.RoomEvent.TranscriptionReceived, (segments, participant) => {
+        const isAgent = participant && participant.isAgent;
+        for (const s of segments) {
+          if (s.final) line(isAgent ? "Agent" : "You", s.text, isAgent ? "agent" : "you");
+        }
+      });
+
+      await room.connect(URL_, TOKEN);
+      await room.localParticipant.setMicrophoneEnabled(true);
+      // Called inside the click handler so it counts as a user gesture and
+      // Chrome's autoplay policy lets the agent be heard.
+      try { await room.startAudio(); } catch (_) {}
+
+      const others = room.remoteParticipants ? room.remoteParticipants.size : 0;
+      say(others
+        ? "Connected, mic on. The agent should greet you."
+        : "Connected, mic on — but nobody else is in the room yet. Is the agent worker running?");
+    } catch (e) {
+      go.disabled = false;
+      say("Failed to connect.");
+      const d = document.createElement("div");
+      d.className = "err";
+      d.textContent = (e && e.message) ? e.message : String(e);
+      logEl.appendChild(d);
+    }
+  };
+</script>

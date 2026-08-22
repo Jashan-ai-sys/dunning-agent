@@ -261,3 +261,18 @@ def test_every_intent_has_an_outcome():
 )
 def test_language_hint_follows_the_customer_preference(preference, expected_fragment):
     assert expected_fragment in language_hint(preference)
+
+
+def test_every_node_carries_the_language_mirroring_rule():
+    """Sarvam runs in transcribe mode, so the model sees the customer's actual
+    language. It must answer in that language rather than defaulting."""
+    for node_ in DUNNING_FLOW.nodes:
+        prompt = DUNNING_FLOW.render(node_.id, CONTEXT)
+        assert "same language" in prompt
+        assert "same script" in prompt
+
+
+def test_language_rule_is_marked_as_overriding():
+    """It has to win against the per-customer preferred-language hint."""
+    prompt = DUNNING_FLOW.render("greet", CONTEXT)
+    assert "overrides every other instruction" in prompt

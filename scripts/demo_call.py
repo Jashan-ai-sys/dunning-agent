@@ -23,6 +23,7 @@ import argparse
 import asyncio
 import json
 import sys
+from pathlib import Path
 
 from livekit import api
 from sqlalchemy import select
@@ -109,14 +110,29 @@ async def main() -> None:
         .to_jwt()
     )
 
+    # A self-contained page, so joining does not depend on a third-party
+    # playground UI that moves around.
+    template = Path(__file__).with_name("join_template.html").read_text(encoding="utf-8")
+    page = (
+        template.replace("__URL__", settings.livekit_url)
+        .replace("__TOKEN__", token)
+        .replace("__ROOM__", args.room)
+        .replace("__AMOUNT__", context["amount_rupees"])
+        .replace("__CUSTOMER__", context["customer_name"])
+    )
+    out = Path(__file__).resolve().parents[1] / "join.html"
+    out.write_text(page, encoding="utf-8")
+
     print(f"dispatched '{settings.livekit_agent_name}' into room '{args.room}'")
     print(f"  customer : {context['customer_name']}")
     print(f"  amount   : Rs {context['amount_rupees']}")
     print(f"  language : {context['preferred_language']}")
     print()
-    print(f"Open {PLAYGROUND} and connect with:")
-    print(f"  URL   {settings.livekit_url}")
-    print(f"  Token {token}")
+    print()
+    print("OPEN THIS FILE IN YOUR BROWSER, then click Connect:")
+    print(f"  {out}")
+    print()
+    print(f"(or {PLAYGROUND} with URL {settings.livekit_url} and the token in that file)")
     print()
     print("If nothing answers, the agent worker is not running. Start it with:")
     print("  uv run --group voice python -m app.voice.agent dev")

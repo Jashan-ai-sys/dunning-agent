@@ -34,6 +34,15 @@ load_dotenv()
 
 server = AgentServer()
 
+#: Used only when a job arrives with no metadata at all, so the agent can be
+#: exercised from the LiveKit console. Never used on a dispatched recovery call.
+SAMPLE_CONTEXT = {
+    "customer_name": "Asha",
+    "amount_rupees": "499",
+    "failure_reason": "your card had insufficient funds",
+    "preferred_language": "hinglish",
+}
+
 
 class CallState:
     """Mutable result of one call, read after the session ends."""
@@ -136,6 +145,13 @@ async def dunning_session(ctx: agents.JobContext) -> None:
     """Entry point. Job metadata carries the case context and the number."""
     settings = get_settings()
     metadata = json.loads(ctx.job.metadata or "{}")
+
+    if not metadata:
+        # Dispatched without context -- the LiveKit console does this. Fall back
+        # to a clearly-labelled sample so the agent is testable from the
+        # dashboard, rather than offering to recover "Rs 0".
+        logger.warning("no job metadata; using the sample call context")
+        metadata = SAMPLE_CONTEXT
 
     call_context = {
         "company_name": metadata.get("company_name", settings.company_name),
