@@ -49,6 +49,7 @@ class BatchMetrics:
     by_status: dict[str, int] = field(default_factory=dict)
     amount_by_status: dict[str, int] = field(default_factory=dict)
     by_failure_code: dict[str, int] = field(default_factory=dict)
+    by_source: dict[str, int] = field(default_factory=dict)
     calls_placed: int = 0
     calls_by_intent: dict[str, int] = field(default_factory=dict)
     median_attempts_to_recover: float | None = None
@@ -82,6 +83,7 @@ class BatchMetrics:
             "by_status": self.by_status,
             "amount_by_status_paise": self.amount_by_status,
             "by_failure_code": self.by_failure_code,
+            "by_source": self.by_source,
             "calls_placed": self.calls_placed,
             "calls_by_intent": self.calls_by_intent,
             "median_attempts_to_recover": self.median_attempts_to_recover,
@@ -93,15 +95,23 @@ async def compute_metrics(
     *,
     since: datetime | None = None,
     until: datetime | None = None,
+    source: str | None = None,
 ) -> BatchMetrics:
-    """Aggregate the batch. ``since``/``until`` bound it by case creation time."""
+    """Aggregate the batch.
+
+    ``since``/``until`` bound it by case creation time. ``source`` restricts it
+    to real ('razorpay') or seeded ('seed') cases -- never report a figure that
+    silently blends the two.
+    """
     metrics = BatchMetrics()
 
-    def scoped(stmt, column=RecoveryCase.created_at):
+    def scoped(stmt, column=RecoveryCase.created_at, case_scoped=True):
         if since is not None:
             stmt = stmt.where(column >= since)
         if until is not None:
             stmt = stmt.where(column < until)
+        if source is not None and case_scoped:
+            stmt = stmt.where(RecoveryCase.source == source)
         return stmt
 
     totals = await session.execute(
@@ -151,16 +161,28 @@ async def compute_metrics(
     )
     metrics.by_failure_code = {(code or "unknown"): count for code, count in failure_rows}
 
+    source_rows = await session.execute(
+        scoped(select(RecoveryCase.source, func.count(RecoveryCase.id)).group_by(
+            RecoveryCase.source
+        ))
+    )
+    metrics.by_source = {src: count for src, count in source_rows}
+
     call_total = await session.execute(
-        scoped(select(func.count(VoiceCall.id)), column=VoiceCall.created_at)
+        scoped(
+            select(func.count(VoiceCall.id)).join(
+                RecoveryCase, RecoveryCase.id == VoiceCall.recovery_case_id
+            ),
+            column=VoiceCall.created_at,
+        )
     )
     metrics.calls_placed = call_total.scalar_one()
 
     intent_rows = await session.execute(
         scoped(
-            select(VoiceCall.detected_intent, func.count(VoiceCall.id)).group_by(
-                VoiceCall.detected_intent
-            ),
+            select(VoiceCall.detected_intent, func.count(VoiceCall.id))
+            .join(RecoveryCase, RecoveryCase.id == VoiceCall.recovery_case_id)
+            .group_by(VoiceCall.detected_intent),
             column=VoiceCall.created_at,
         )
     )
@@ -202,6 +224,14 @@ def format_report(metrics: BatchMetrics) -> str:
         for status, count in sorted(metrics.by_status.items()):
             amount = rupees(metrics.amount_by_status.get(status, 0))
             lines.append(f"    {status:<16} {count:>5}   {amount:>12}")
+
+    if len(metrics.by_source) > 1:
+        counts = ", ".join(f"{k}={v}" for k, v in sorted(metrics.by_source.items()))
+        lines += [
+            "",
+            f"  !! MIXED SOURCES ({counts}) -- this total blends real and seeded",
+            "     cases. Re-run with --source razorpay or --source seed.",
+        ]
 
     if metrics.by_failure_code:
         lines += ["", "  By failure code"]

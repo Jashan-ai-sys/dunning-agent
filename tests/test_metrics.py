@@ -193,3 +193,65 @@ async def test_report_includes_the_headline_numbers(session):
     assert "₹5,000.00" in output  # at risk
     assert "₹2,500.00" in output  # recovered
     assert "50.0%" in output
+
+
+# --- source separation -------------------------------------------------
+
+
+async def test_source_filter_isolates_seeded_cases(session):
+    """Simulated recovery must never be reportable as real money."""
+    await add_case(session, "pay_real", 100_000, CaseStatus.OPEN)
+    await add_case(
+        session, "pay_seed", 50_000, CaseStatus.RECOVERED,
+        recovered_amount=50_000, source="seed",
+    )
+    await session.commit()
+
+    real = await compute_metrics(session, source="razorpay")
+    seeded = await compute_metrics(session, source="seed")
+
+    assert real.total_cases == 1
+    assert real.amount_recovered == 0
+    assert real.recovery_rate_by_amount == 0.0
+
+    assert seeded.total_cases == 1
+    assert seeded.amount_recovered == 50_000
+    assert seeded.recovery_rate_by_amount == 1.0
+
+
+async def test_cases_default_to_the_razorpay_source(session):
+    await add_case(session, "pay_1", 10_000)
+    await session.commit()
+
+    metrics = await compute_metrics(session)
+    assert metrics.by_source == {"razorpay": 1}
+
+
+async def test_report_warns_when_sources_are_mixed(session):
+    """An unfiltered total spanning both is misleading, so say so loudly."""
+    await add_case(session, "pay_real", 10_000)
+    await add_case(session, "pay_seed", 10_000, source="seed")
+    await session.commit()
+
+    output = format_report(await compute_metrics(session))
+    assert "MIXED SOURCES" in output
+    assert "--source" in output
+
+
+async def test_report_does_not_warn_on_a_single_source(session):
+    await add_case(session, "pay_seed", 10_000, source="seed")
+    await session.commit()
+
+    output = format_report(await compute_metrics(session, source="seed"))
+    assert "MIXED SOURCES" not in output
+
+
+async def test_call_counts_respect_the_source_filter(session):
+    real = await add_case(session, "pay_real", 10_000)
+    seeded = await add_case(session, "pay_seed", 10_000, source="seed")
+    session.add(VoiceCall(recovery_case_id=real.id, detected_intent="declined"))
+    session.add(VoiceCall(recovery_case_id=seeded.id, detected_intent="retry_now"))
+    await session.commit()
+
+    assert (await compute_metrics(session, source="seed")).calls_placed == 1
+    assert (await compute_metrics(session, source="razorpay")).calls_by_intent == {"declined": 1}

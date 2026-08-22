@@ -106,6 +106,12 @@ class RecoveryCase(Base, TimestampMixin):
     failure_code: Mapped[str | None] = mapped_column(String(64))
     failure_reason: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="open", index=True)
+    # 'razorpay' for cases opened by a real webhook, 'seed' for synthetic demo
+    # data. Kept in the schema rather than a naming convention, so simulated
+    # recovery can never be reported as real money.
+    source: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="razorpay", server_default="razorpay", index=True
+    )
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
