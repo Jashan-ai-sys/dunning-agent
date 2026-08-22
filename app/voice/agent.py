@@ -15,6 +15,7 @@ Stack: Sarvam STT (Indian languages, streaming), Gemini 2.5 Flash, Cartesia TTS.
 import json
 import logging
 
+from dotenv import load_dotenv
 from livekit import agents, api
 from livekit.agents import Agent, AgentServer, AgentSession, RunContext, function_tool
 from livekit.plugins import cartesia, google, sarvam, silero
@@ -24,6 +25,12 @@ from app.voice.flow import DUNNING_FLOW, language_hint
 from app.voice.walker import GraphWalker, InvalidTransition
 
 logger = logging.getLogger(__name__)
+
+# The LiveKit worker reads LIVEKIT_URL/API_KEY/API_SECRET straight from
+# os.environ, and each provider plugin reads its own key the same way -- none of
+# them know about our Settings object. Loading .env into the process environment
+# is what makes `python -m app.voice.agent` work from a checkout.
+load_dotenv()
 
 server = AgentServer()
 
@@ -111,7 +118,12 @@ def build_session() -> AgentSession:
     settings = get_settings()
     tts_kwargs = {"voice": settings.cartesia_voice} if settings.cartesia_voice else {}
     return AgentSession(
-        stt=sarvam.STT(model=settings.sarvam_stt_model, mode="transcribe", flush_signal=True),
+        stt=sarvam.STT(
+            model=settings.sarvam_stt_model,
+            language=settings.sarvam_language,
+            mode="transcribe",
+            flush_signal=True,
+        ),
         llm=build_llm(),
         tts=cartesia.TTS(**tts_kwargs),
         vad=silero.VAD.load(),

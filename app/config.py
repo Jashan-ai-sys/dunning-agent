@@ -50,6 +50,9 @@ class Settings(BaseSettings):
     # saaras:v4 supersedes saarika:v2.5, which Sarvam is deprecating. Beta
     # access is per-key, so this is only usable with a whitelisted key.
     sarvam_stt_model: str = "saaras:v4"
+    # "unknown" lets Sarvam detect the language per utterance. Forcing en-IN
+    # mis-transcribes the Hindi half of a Hinglish sentence.
+    sarvam_language: str = "unknown"
     gemini_model: str = "gemini-2.5-flash"
     # Vertex AI rather than the Gemini Developer API: authenticates with ADC or
     # a service account instead of an API key, and keeps the LLM inside the same

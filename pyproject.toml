@@ -24,6 +24,8 @@ voice = [
     "livekit-plugins-google",
     "livekit-plugins-cartesia",
     "livekit-api",
+    # The plugins read their keys from os.environ, so .env must be loaded.
+    "python-dotenv",
 ]
 dev = [
     "pytest>=8.3",

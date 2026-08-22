@@ -661,6 +661,7 @@ voice = [
     { name = "livekit-plugins-cartesia" },
     { name = "livekit-plugins-google" },
     { name = "livekit-plugins-sarvam" },
+    { name = "python-dotenv" },
 ]
 
 [package.metadata]
@@ -687,6 +688,7 @@ voice = [
     { name = "livekit-plugins-cartesia" },
     { name = "livekit-plugins-google" },
     { name = "livekit-plugins-sarvam" },
+    { name = "python-dotenv" },
 ]
 
 [[package]]
