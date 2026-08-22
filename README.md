@@ -5,8 +5,9 @@ Razorpay AI Buildathon — **Track 03: AI Revenue Recovery**.
 Detects subscription revenue at risk, decides on an intervention, and executes a
 bounded recovery workflow with stopping rules and a full audit trail.
 
-**Status: Phase 1 complete** — the trigger layer (webhook intake, correlation,
-case creation) is built and tested. See [Roadmap](#roadmap).
+**Status: Phases 1–2 complete** — the trigger layer (webhook intake, correlation,
+case creation) and the policy engine + orchestrator (who to contact, when, and
+when to stop) are built and tested. See [Roadmap](#roadmap).
 
 ---
 
@@ -51,6 +52,55 @@ before any handler runs, so a crash mid-processing cannot lose an event —
 `webhook_events.processed_at IS NULL` is the replay queue, and Razorpay's own
 at-least-once redelivery is a backstop rather than the only safety net.
 
+A separate worker loop drives recovery forward:
+
+```
+worker tick (every 60s)
+  │
+  ├─▶ replay sweep ── re-dispatch envelopes whose handler died
+  │
+  └─▶ orchestrator ── claim open cases (FOR UPDATE SKIP LOCKED)
+                        │
+                        ▼
+                    policy.decide()  ──▶  CALL / WAIT / STOP
+                        │
+                        └─▶ execute + append to the audit trail
+```
+
+## The recovery policy
+
+Every case leaves the policy as exactly one of **CALL**, **WAIT** or **STOP**,
+and STOP is permanent. That is what makes the workflow bounded. The rules, in
+evaluation order — all STOP conditions are checked before any WAIT condition, so
+a dead case gets closed out rather than parked forever outside the calling
+window:
+
+| # | Rule | Outcome |
+|---|---|---|
+| 1 | Case already recovered / declined / stopped | **STOP** `already_closed` |
+| 2 | `attempt_count >= max_attempts` (default 3) | **STOP** `max_attempts_reached` |
+| 3 | Amount below `MIN_RECOVERABLE_AMOUNT_PAISE` (default ₹50) | **STOP** `below_min_amount` |
+| 4 | No phone number on file | **STOP** `no_contact_number` |
+| 5 | Last attempt within `RETRY_BACKOFF_HOURS` (default 24h) | **WAIT** `within_backoff` |
+| 6 | Outside 09:00–21:00 in `CONTACT_TIMEZONE` | **WAIT** `outside_contact_window` |
+| — | Otherwise | **CALL** |
+
+Rule 6 is the compliance rule: TRAI restricts commercial calls to 09:00–21:00,
+and the window is evaluated in the customer's local time rather than UTC —
+getting that wrong means calling people at 3am. Rule 5 is what stops a
+once-a-minute tick from becoming a once-a-minute call.
+
+[`app/policy.py`](app/policy.py) is pure — no database, no clock, no network.
+`now` and `settings` are arguments, so every rule above is covered by a plain
+unit test.
+
+Cases Razorpay has itself given up on (`halted_at` set, from
+`subscription.halted`) are worked first. Contact is made through the
+`ContactChannel` protocol, so Phase 3 swaps in LiveKit without touching the
+policy or the loop; until then `LoggingChannel` records the intent and is named
+`logging` in the audit trail so a run can never be mistaken for evidence that a
+customer was actually called.
+
 ### Tables
 
 | Table | Purpose |
@@ -79,6 +129,12 @@ uv run alembic upgrade head
 ```bash
 uv run uvicorn app.main:app --reload
 curl http://localhost:8000/healthz
+```
+
+The worker runs as a separate process:
+
+```bash
+uv run python -m app.worker
 ```
 
 ### Point Razorpay at it
@@ -110,12 +166,19 @@ resolve the subscription.
 uv run pytest
 ```
 
-23 tests. Signature tests are pure unit tests; the rest need the Postgres
-container and are skipped automatically if it is not reachable. They cover
-webhook redelivery (no duplicate cases), one-off vs subscription failures, the
-escalation stamp, payment-link attribution via `notes.recovery_case_id`, and the
-double-counting hazard where `subscription.charged` and `payment.captured` both
-fire for a single recovery.
+58 tests. The signature and policy tests are pure unit tests; the rest need the
+Postgres container and are skipped automatically if it is not reachable.
+
+They cover webhook redelivery (no duplicate cases), one-off vs subscription
+failures, the escalation stamp, payment-link attribution via
+`notes.recovery_case_id`, and the double-counting hazard where
+`subscription.charged` and `payment.captured` both fire for a single recovery.
+On the policy and orchestrator side: every rule and its boundary, the contact
+window evaluated across five times of day, backoff suppressing a second call,
+STOP being permanent, waiting cases writing no audit noise, a channel outage
+neither burning the customer's attempt budget nor aborting the rest of the
+batch, and the replay sweep leaving in-flight events alone while recovering
+stale ones.
 
 ## Deploy (GCP)
 
@@ -135,8 +198,8 @@ instance that cannot reach Cloud SQL.
 
 - [x] **Phase 1** — Webhook intake, signature verification, idempotency,
       invoice correlation, case creation, audit trail
-- [ ] **Phase 2** — Policy engine and orchestrator (who to contact, when, how
-      many times; stopping rules)
+- [x] **Phase 2** — Policy engine, orchestrator, stopping rules, contact-window
+      compliance, replay sweep
 - [ ] **Phase 3** — LiveKit outbound voice agent (Hinglish/Hindi/English), intent
       capture
 - [ ] **Phase 4** — Razorpay Payment Links for the `retry_now` intent, recovery
@@ -145,12 +208,17 @@ instance that cannot reach Cloud SQL.
 
 ## Known gaps
 
-- **`subscription.pending` with no open case.** If Razorpay's `payment.failed`
-  never reaches us (endpoint down past the retry window), the subscription goes
-  pending with nothing to attach to. Currently logged as a warning; Phase 2 adds
-  a reconciler that backfills from `GET /invoices?subscription_id=`.
-- **Background tasks, not a queue.** Processing runs in-process via FastAPI
-  `BackgroundTasks`. The durable envelope means nothing is lost, but nothing
-  automatically retries yet — the replay sweep lands with the Phase 2 worker.
+- **`subscription.pending` with no open case — still open.** If Razorpay's
+  `payment.failed` never reaches us (endpoint down past its retry window), the
+  subscription goes pending with nothing to attach to. Still only logged as a
+  warning: the reconciler that would backfill from
+  `GET /invoices?subscription_id=` is not built. The replay sweep does not cover
+  this, because it only retries events we actually received.
+- **Background tasks, not a queue.** Webhook processing runs in-process via
+  FastAPI `BackgroundTasks`. The durable envelope plus the worker's replay sweep
+  means nothing is lost and stalled events are retried, but there is no backoff
+  or dead-letter queue — an event whose handler fails permanently is retried
+  every tick. Fine at hackathon volume; it would need a real queue in
+  production.
 - **No outbound telephony yet.** LiveKit Cloud alone does not place PSTN calls;
   that needs a SIP trunk (Twilio/Plivo) wired to LiveKit SIP. Phase 3.

@@ -11,6 +11,8 @@ dependencies = [
     "alembic>=1.14",
     "pydantic-settings>=2.6",
     "httpx>=0.28",
+    # zoneinfo has no tz database on Windows; the contact-window rule needs one.
+    "tzdata>=2024.2",
 ]
 
 [dependency-groups]

@@ -10,8 +10,10 @@ Razorpay's own at-least-once redelivery is a backstop, not the only safety net.
 
 import logging
 import traceback
+from datetime import timedelta
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -81,6 +83,34 @@ async def process_event(webhook_event_pk: int) -> None:
             logger.exception("handler for %s failed on event %s", event.event, event.id)
             await session.rollback()
             await _record_failure(webhook_event_pk, traceback.format_exc(limit=5))
+
+
+async def replay_unprocessed(limit: int = 50, older_than_seconds: int = 60) -> int:
+    """Reprocess envelopes whose handler never completed.
+
+    Covers the case Razorpay's own redelivery does not: we returned 200, so it
+    considers the event delivered, but our handler then died (bad API response,
+    process restart mid-task). The age cutoff keeps this from racing the
+    background task that is still legitimately in flight.
+
+    Returns the number of events re-dispatched.
+    """
+    cutoff = utcnow() - timedelta(seconds=older_than_seconds)
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(WebhookEvent.id)
+            .where(WebhookEvent.processed_at.is_(None))
+            .where(WebhookEvent.created_at < cutoff)
+            .order_by(WebhookEvent.id)
+            .limit(limit)
+        )
+        event_ids = list(result.scalars())
+
+    for event_id in event_ids:
+        await process_event(event_id)
+    if event_ids:
+        logger.info("replayed %d unprocessed webhook events", len(event_ids))
+    return len(event_ids)
 
 
 async def _record_failure(webhook_event_pk: int, error: str) -> None:
