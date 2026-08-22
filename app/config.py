@@ -59,7 +59,11 @@ class Settings(BaseSettings):
     # Mumbai: verified to serve gemini-2.5-flash, and every extra round trip
     # is audible on a phone call.
     google_cloud_location: str = "asia-south1"
-    cartesia_voice: str = ""
+    # "Arushi - Hinglish Speaker". The flow code-switches by default, so a voice
+    # trained on Hinglish handles it better than a generic Hindi or English one.
+    # Alternatives: Kavita - Customer Care Agent 56e35e2d-6eb6-4226-ab8b-9776515a7094,
+    # Devansh - Warm Support Agent 1259b7e3-cb8a-43df-9446-30971a46b8b0.
+    cartesia_voice: str = "95d51f79-c397-46f9-b49a-23763d3eaa2d"
 
     log_level: str = "INFO"
 
