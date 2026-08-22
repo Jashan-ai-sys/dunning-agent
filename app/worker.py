@@ -8,6 +8,7 @@ Runs two jobs on a fixed interval:
 Run it alongside the API:  uv run python -m app.worker
 """
 
+import argparse
 import asyncio
 import logging
 
@@ -37,14 +38,20 @@ async def tick() -> None:
         logger.exception("orchestrator tick failed")
 
 
-async def main() -> None:
+async def main(once: bool = False) -> None:
     settings = get_settings()
     logging.basicConfig(
         level=settings.log_level,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    logger.info("worker started, interval %ss", settings.worker_interval_seconds)
     try:
+        if once:
+            # Cloud Run Jobs invoke the container once per schedule tick, so the
+            # loop lives in Cloud Scheduler rather than in this process.
+            logger.info("worker running a single tick")
+            await tick()
+            return
+        logger.info("worker started, interval %ss", settings.worker_interval_seconds)
         while True:
             await tick()
             await asyncio.sleep(settings.worker_interval_seconds)
@@ -53,7 +60,14 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="run one tick and exit (for Cloud Run Jobs / cron)",
+    )
+    args = parser.parse_args()
     try:
-        asyncio.run(main())
+        asyncio.run(main(once=args.once))
     except KeyboardInterrupt:
         logger.info("worker stopped")
