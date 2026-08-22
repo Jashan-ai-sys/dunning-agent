@@ -47,8 +47,18 @@ class Settings(BaseSettings):
     company_name: str = "Acme"
     # Sarvam / Gemini / Cartesia keys are read from the environment by their
     # own plugins (SARVAM_API_KEY, GOOGLE_API_KEY, CARTESIA_API_KEY).
-    sarvam_stt_model: str = "saaras:v3"
+    # saaras:v4 supersedes saarika:v2.5, which Sarvam is deprecating. Beta
+    # access is per-key, so this is only usable with a whitelisted key.
+    sarvam_stt_model: str = "saaras:v4"
     gemini_model: str = "gemini-2.5-flash"
+    # Vertex AI rather than the Gemini Developer API: authenticates with ADC or
+    # a service account instead of an API key, and keeps the LLM inside the same
+    # GCP project as the rest of the deployment.
+    google_use_vertex: bool = True
+    google_cloud_project: str = ""
+    # Mumbai: verified to serve gemini-2.5-flash, and every extra round trip
+    # is audible on a phone call.
+    google_cloud_location: str = "asia-south1"
     cartesia_voice: str = ""
 
     log_level: str = "INFO"

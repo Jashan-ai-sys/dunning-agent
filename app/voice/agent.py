@@ -89,12 +89,30 @@ class NodeAgent(Agent):
         return NodeAgent(self._state)
 
 
+def build_llm() -> google.LLM:
+    """Gemini via Vertex AI by default.
+
+    Vertex authenticates with ADC or a service account rather than an API key,
+    which keeps the LLM inside the same GCP project and IAM boundary as the rest
+    of the deployment. Set GOOGLE_USE_VERTEX=false to fall back to the Gemini
+    Developer API and GOOGLE_API_KEY.
+    """
+    settings = get_settings()
+    if not settings.google_use_vertex:
+        return google.LLM(model=settings.gemini_model)
+
+    kwargs: dict = {"vertexai": True, "location": settings.google_cloud_location}
+    if settings.google_cloud_project:
+        kwargs["project"] = settings.google_cloud_project
+    return google.LLM(model=settings.gemini_model, **kwargs)
+
+
 def build_session() -> AgentSession:
     settings = get_settings()
     tts_kwargs = {"voice": settings.cartesia_voice} if settings.cartesia_voice else {}
     return AgentSession(
         stt=sarvam.STT(model=settings.sarvam_stt_model, mode="transcribe", flush_signal=True),
-        llm=google.LLM(model=settings.gemini_model),
+        llm=build_llm(),
         tts=cartesia.TTS(**tts_kwargs),
         vad=silero.VAD.load(),
         turn_detection="stt",
