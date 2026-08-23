@@ -255,6 +255,10 @@ instance that cannot reach Cloud SQL.
 
 ## Design notes
 
+- [The live pipeline, end to end](docs/pipeline.md) — what actually runs, in
+  order, with real component names and configured values. Anything unbuilt is
+  marked as such rather than drawn as if it worked.
+
 - [Fully local voice stack](docs/local-voice-architecture.md) — the proposed
   self-hosted STT/LLM/TTS design, why the entity-dense ASR gap matters more
   than headline WER, and what it would cost to close it. Proposed, not built.
