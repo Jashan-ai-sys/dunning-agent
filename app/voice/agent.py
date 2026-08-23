@@ -12,6 +12,7 @@ that cannot be tested without a telephony provider is kept as small as possible.
 Stack: Sarvam STT (Indian languages, streaming), Gemini 2.5 Flash, Cartesia TTS.
 """
 
+import asyncio
 import json
 import logging
 
@@ -24,6 +25,7 @@ from app.config import get_settings
 from app.voice.flow import DUNNING_FLOW, language_hint
 from app.voice.spoken import spoken_amount
 from app.voice.walker import GraphWalker, InvalidTransition
+from app.voice.warmup import await_warmup, warm_sarvam
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +189,11 @@ def build_session() -> AgentSession:
 async def dunning_session(ctx: agents.JobContext) -> None:
     """Entry point. Job metadata carries the case context and the number."""
     settings = get_settings()
+
+    # Fire immediately and overlap with everything below. saaras has documented
+    # 15-25s cold starts that swallow the opening exchange.
+    warmup = asyncio.create_task(warm_sarvam())
+
     metadata = json.loads(ctx.job.metadata or "{}")
 
     if not metadata:
@@ -213,6 +220,8 @@ async def dunning_session(ctx: agents.JobContext) -> None:
     state = CallState(GraphWalker(DUNNING_FLOW, call_context))
 
     session = build_session()
+    # Latest useful moment: the pipeline is built, nobody has spoken yet.
+    await await_warmup(warmup)
     await session.start(room=ctx.room, agent=NodeAgent(state))
 
     phone = metadata.get("phone")
