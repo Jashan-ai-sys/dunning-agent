@@ -127,6 +127,42 @@ actual node prompts*, and choose on p95 first-token latency, not on benchmarks.
 A small model inside a tightly constrained graph is the design we already
 committed to; this is where that pays off.
 
+### Speculative decoding
+
+[LFM2.5-DSpark](https://www.liquid.ai/blog/lfm2.5-dspark) (Aug 2026) pairs a
+~300M drafter with an LFM2.5 target: the drafter proposes a 9-token block, the
+target verifies it in one forward pass. Up to 3.18x on H100, 2.87x on-device,
+and **57% lower function-calling latency on LFM2.5-2.6B** -- which is our exact
+per-turn shape, one `transition(label)` tool call. Under greedy decoding the
+emitted sequence is provably identical to the target alone, so this is speed at
+no quality cost. llama.cpp and SGLang both support it.
+
+Two things to be clear about before adopting it.
+
+**Hindi is claimed but not measured.** LFM2.5 lists Hindi among supported
+languages; its published multilingual benchmarks cover seven -- Arabic, French,
+German, Spanish, Japanese, Korean, Chinese -- and Hindi is not among them.
+LFM2, the previous generation, did not support Hindi at all, and there is no
+Hinglish or code-mixed evaluation published. Against Sarvam, trained from
+scratch on 12T Indic tokens, that is a large unquantified gap. A 3x speedup on
+a model that handles Hinglish poorly is not a win: the customer hears language
+quality, not tokens per second.
+
+**The technique is not exclusive to these checkpoints.** vLLM -- which already
+serves our Sarvam-30B -- supports draft-model speculative decoding plus n-gram
+and EAGLE-style variants needing no separate drafter. DSpark's edge is a
+purpose-trained drafter with high acceptance rates, not access to the method.
+
+**Evaluation gate, in this order:**
+
+1. Hinglish quality, as a pass/fail gate. 20 turns from the real graph, scored
+   by a Hindi speaker. Fail this and latency is irrelevant.
+2. p95 first-token latency, measured through the real `transition` tool call.
+3. Sarvam-30B with vLLM speculative decoding enabled, as the control -- it may
+   close most of the gap while keeping the Indic-native model.
+
+Roughly two hours of work, and it replaces a guess with a number.
+
 ## The entity problem is the real one
 
 Standard WER hides the failure that would break this product. From
@@ -204,7 +240,9 @@ hosted stack pays three times per turn. That is the one place local should be
 ## Open decisions
 
 1. ASR base: IndicConformer-600M vs `vasista22` Whisper-large-v2.
-2. LLM size: Sarvam-30B (already debugged) vs a 4–8B chosen on latency.
+2. LLM: Sarvam-30B (already debugged, Indic-native) vs LFM2.5-2.6B-DSpark
+   (faster, Hindi unbenchmarked) vs Sarvam-30B with vLLM speculative decoding.
+   Gate on Hinglish quality before comparing latency.
 3. Whether to self-host LiveKit, or accept LiveKit Cloud for signalling since it
    never sees decrypted audio content we care about. Lower priority than the
    model layer.
