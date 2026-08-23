@@ -35,6 +35,32 @@ class Settings(BaseSettings):
     worker_interval_seconds: int = 60
     worker_batch_size: int = 50
 
+    # --- Turn detection (VAD) ---
+    # Values from the Blostem production telephony backend, whose comments carry
+    # the reasoning. They tuned against 8 kHz mu-law with background noise; a
+    # clean browser stream may tolerate a lower threshold, so these are knobs.
+    #
+    #   confidence 0.7  -> activation_threshold
+    #   stop_secs  0.3  -> min_silence_duration. They lowered it from 0.6 on
+    #                      2026-04-17 "to cut ~300ms of perceived bot thinking
+    #                      delay". LiveKit's own default is 0.55, i.e. slower
+    #                      than the value they moved away from.
+    #   start_secs 0.4  -> min_speech_duration. Deliberately high to suppress
+    #                      false barge-ins; they reverted an 0.2 experiment.
+    #                      LiveKit's default is 0.05, so this is the one to
+    #                      raise carefully rather than copy outright.
+    #
+    # WARNING carried over with the number: their own smart_turn_shadow notes
+    # that Silero at confidence=0.7 "never fired on the customer channel" across
+    # three recordings while firing readily on the bot's TTS in the same files.
+    # Narrowband carrier audio measures 0.05-0.86% of its energy above 4 kHz, so
+    # the upper half a 16 kHz VAD expects is simply empty. 0.7 is right for the
+    # wideband browser path we run today; when the SIP leg lands, expect to drop
+    # this and verify the VAD actually fires on the customer, not just on us.
+    vad_activation_threshold: float = 0.7
+    vad_min_silence_duration: float = 0.3
+    vad_min_speech_duration: float = 0.05
+
     # --- Voice ---
     livekit_url: str = ""
     livekit_api_key: str = ""

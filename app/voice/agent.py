@@ -154,7 +154,11 @@ def build_session() -> AgentSession:
         ),
         llm=build_llm(),
         tts=cartesia.TTS(**tts_kwargs),
-        vad=silero.VAD.load(),
+        vad=silero.VAD.load(
+            activation_threshold=settings.vad_activation_threshold,
+            min_silence_duration=settings.vad_min_silence_duration,
+            min_speech_duration=settings.vad_min_speech_duration,
+        ),
         turn_detection="stt",
     )
 

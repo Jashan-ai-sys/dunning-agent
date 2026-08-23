@@ -123,6 +123,40 @@ Worth stealing:
 - **`greeting_prerender`** — cold backend gave **5.5 s of dead air** after
   pickup. They pre-render greeting PCM to Redis in parallel with the dial-out.
 
+## 5a. VAD and turn detection — the numbers, and the trap
+
+Production telephony transport (`media_stream.py`), with their dated reasoning:
+
+| Pipecat param | Value | LiveKit equivalent | LiveKit default | Adopted |
+|---|---|---|---|---|
+| `confidence` | 0.7 | `activation_threshold` | 0.5 | **0.7** |
+| `stop_secs` | 0.3 | `min_silence_duration` | 0.55 | **0.3** |
+| `start_secs` | 0.4 | `min_speech_duration` | 0.05 | left at 0.05 |
+| `min_volume` | 0.6 | *(no equivalent)* | — | n/a |
+
+`stop_secs` is the free win: they lowered it 0.6 → 0.3 on 2026-04-17 *"to cut
+~300 ms of perceived bot thinking delay"*, and **LiveKit's default of 0.55 is
+slower than the value they abandoned**. We were shipping a worse setting than
+their pre-optimisation state.
+
+`start_secs` does not transfer cleanly. Theirs is high on purpose, to suppress
+false barge-ins on noisy telephony; LiveKit's semantics differ and our transport
+is clean WebRTC. Raise it only if false barge-ins actually appear.
+
+**The trap.** `smart_turn_shadow.py` records that Silero at `confidence=0.7`
+*"never fired on the customer channel"* across three recordings, while firing
+readily on the bot's own TTS in the same files. Narrowband carrier audio carries
+0.05–0.86% of its energy above 4 kHz, so the upper band a 16 kHz VAD expects is
+empty. 0.7 is right for our wideband browser path; **on the SIP leg it may never
+trigger**, and that must be verified rather than assumed.
+
+Related: they run `smart-turn` in **shadow mode only** — it scored **AUC 0.467**
+against their own recordings, below chance, for the same narrowband reason. Do
+not reach for it.
+
+Barge-in thresholds, for later: `min_words=3` in the barge-in processor,
+`interruption_words=2` in the builder.
+
 ## 6. If we self-host: VoxCPM2 notes
 
 From `voxcpm_tts.py`, running on their own L40S:
