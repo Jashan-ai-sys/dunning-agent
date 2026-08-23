@@ -1,0 +1,74 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Authorise subscription — dunning demo</title>
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+<style>
+  body { font: 15px/1.6 system-ui, sans-serif; margin: 0; background: #0e0f13; color: #e8e8ea; }
+  main { max-width: 620px; margin: 0 auto; padding: 36px 24px; }
+  h1 { font-size: 19px; margin: 0 0 4px; }
+  .sub { color: #8b8d98; font-size: 13px; margin-bottom: 26px; }
+  button { font: inherit; padding: 11px 22px; border: 0; border-radius: 6px;
+           background: #3b82f6; color: #fff; cursor: pointer; }
+  button:disabled { background: #2a2d36; color: #6b6d78; cursor: default; }
+  .card { background: #16181f; border-radius: 8px; padding: 14px 16px; margin: 18px 0; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+             color: #8b8d98; margin: 0 0 8px; }
+  code { background: #1c1f27; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+  ol { padding-left: 20px; } li { margin-bottom: 7px; }
+  .warn { border-left: 3px solid #f59e0b; padding-left: 12px; color: #fbbf24; }
+  #out { margin-top: 18px; padding: 12px 14px; border-radius: 6px; background: #16181f;
+         border-left: 3px solid #3b82f6; white-space: pre-wrap; font-size: 13px; }
+</style>
+<main>
+  <h1>Authorise the demo subscription</h1>
+  <div class="sub">__SUBSCRIPTION__ &middot; &#8377;__AMOUNT__</div>
+
+  <div class="card">
+    <h2>To make the charge FAIL</h2>
+    <ol>
+      <li>Pay with any Razorpay <strong>test card</strong> (e.g. <code>4111 1111 1111 1111</code>, any future expiry, any CVV).</li>
+      <li>On the OTP screen, enter <strong>fewer than 4 digits</strong> &mdash; e.g. <code>1</code>.</li>
+      <li>That is Razorpay's documented test-mode failure lever.</li>
+    </ol>
+    <p class="warn">A failed charge is the point. It fires <code>payment.failed</code>
+      with a real <code>invoice_id</code>, which opens a recovery case by itself.</p>
+  </div>
+
+  <button id="go">Open Razorpay Checkout</button>
+  <div id="out">Not started.</div>
+</main>
+<script>
+  const out = document.getElementById("out");
+  const say = (t) => { out.textContent = t; };
+
+  document.getElementById("go").onclick = () => {
+    const rzp = new Razorpay({
+      key: "__KEY_ID__",
+      subscription_id: "__SUBSCRIPTION__",
+      name: "__COMPANY__",
+      description: "Subscription authorisation (test mode)",
+      prefill: { name: "__NAME__", email: "__EMAIL__", contact: "__CONTACT__" },
+      theme: { color: "#3b82f6" },
+      handler: (r) => say(
+        "Authorised.\npayment_id: " + (r.razorpay_payment_id || "-") +
+        "\nsubscription_id: " + (r.razorpay_subscription_id || "-") +
+        "\n\nIf you entered a short OTP the charge failed instead — that is what we want."
+      ),
+      modal: { ondismiss: () => say("Checkout closed without completing.") },
+    });
+
+    rzp.on("payment.failed", (e) => {
+      const err = (e && e.error) || {};
+      say(
+        "Payment FAILED — this is the good outcome.\n" +
+        "code: " + (err.code || "-") + "\n" +
+        "reason: " + (err.description || "-") + "\n" +
+        "payment_id: " + ((err.metadata && err.metadata.payment_id) || "-") +
+        "\n\nRazorpay is now firing payment.failed at the webhook endpoint."
+      );
+    });
+
+    say("Opening checkout…");
+    rzp.open();
+  };
+</script>

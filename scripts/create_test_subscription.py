@@ -41,6 +41,7 @@ import argparse
 import asyncio
 import json
 import sys
+from pathlib import Path
 
 from app.config import get_settings
 from app.razorpay.client import RazorpayClient
@@ -156,16 +157,33 @@ async def main() -> None:
     print(f"  subscription : {subscription['id']}")
     print(f"  status       : {subscription.get('status')}")
     print(f"  amount       : ₹{args.amount} every {interval} x {args.period}")
+    # Razorpay's hosted subscription page needs the feature enabled on the
+    # account and returns "Hosted page is not available" when it is not. Render
+    # Checkout.js locally instead -- same authorisation, no hosted dependency.
+    template = Path(__file__).with_name("checkout_template.html").read_text(encoding="utf-8")
+    page = (
+        template.replace("__KEY_ID__", settings.razorpay_key_id)
+        .replace("__SUBSCRIPTION__", subscription["id"])
+        .replace("__AMOUNT__", str(args.amount))
+        .replace("__COMPANY__", settings.company_name)
+        .replace("__NAME__", args.name)
+        .replace("__EMAIL__", args.email)
+        .replace("__CONTACT__", args.contact)
+    )
+    checkout = Path(__file__).resolve().parents[1] / "authorise.html"
+    checkout.write_text(page, encoding="utf-8")
+
     auth_link = subscription.get("short_url")
+    print(f"\n  AUTHORISE — open this file in your browser:\n    {checkout}")
     if auth_link:
-        print(f"\n  AUTHENTICATE HERE:\n    {auth_link}")
+        print(f"\n  (Razorpay's hosted page, if enabled on the account:\n    {auth_link})")
     else:
         print("\n  no short_url in the response:")
         print(json.dumps(subscription, indent=2)[:600])
     print("=" * 70)
     print(
         "\nNext:\n"
-        "  1. Open the link and authorise with a Razorpay test card.\n"
+        "  1. Open authorise.html and pay with a Razorpay test card.\n"
         "  2. To make a charge FAIL, enter an OTP shorter than 4 digits.\n"
         "  3. Razorpay then fires payment.failed with a real invoice_id at\n"
         "     the webhook endpoint, and a recovery case opens by itself.\n"
