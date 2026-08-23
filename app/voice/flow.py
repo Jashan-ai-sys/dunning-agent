@@ -87,7 +87,7 @@ EXPLAIN = Node(
     ),
     edges=(
         Edge(
-            to="ask_intent",
+            to="reason_inquiry",
             label="acknowledged",
             condition="The customer acknowledges the failed payment or asks what to do next.",
         ),
@@ -97,6 +97,45 @@ EXPLAIN = Node(
             condition=(
                 "The customer says the charge is wrong, that they already paid, that they "
                 "cancelled the subscription, or that they never signed up."
+            ),
+        ),
+    ),
+)
+
+REASON_INQUIRY = Node(
+    id="reason_inquiry",
+    kind=NodeKind.AGENT,
+    prompt=(
+        SYSTEM_STYLE
+        + "\n\nAsk one short question: do they know why it failed? An expired "
+        "card, a daily limit, or simply not enough balance that day. Do not "
+        "lecture, do not offer options yet, and do not ask twice. This is one "
+        "question, then you listen."
+    ),
+    extracts=("failure_cause",),
+    edges=(
+        Edge(
+            to="ask_intent",
+            label="reason_given",
+            condition=(
+                "The customer gives any reason, says they do not know, or asks to get "
+                "on with it."
+            ),
+        ),
+        Edge(
+            to="pay_later",
+            label="financial_difficulty",
+            condition=(
+                "The customer says they cannot afford it right now, are short of money, "
+                "have lost work, or are in financial trouble."
+            ),
+        ),
+        Edge(
+            to="dispute",
+            label="disputes_charge",
+            condition=(
+                "The customer says the charge is wrong, that they already paid, or that "
+                "they cancelled the subscription."
             ),
         ),
     ),
@@ -134,6 +173,14 @@ ASK_INTENT = Node(
             condition=(
                 "The customer refuses to pay, wants to cancel the subscription, or asks "
                 "not to be contacted again."
+            ),
+        ),
+        Edge(
+            to="pay_later",
+            label="financial_difficulty",
+            condition=(
+                "The customer says they cannot afford it right now or are short of "
+                "money. This is not a refusal -- do not treat it as one."
             ),
         ),
         Edge(
@@ -202,7 +249,17 @@ DISPUTE = Node(
 
 
 DUNNING_FLOW = ConversationGraph(
-    nodes=(GREET, EXPLAIN, ASK_INTENT, PAY_NOW, PAY_LATER, DECLINED, WRONG_NUMBER, DISPUTE)
+    nodes=(
+        GREET,
+        EXPLAIN,
+        REASON_INQUIRY,
+        ASK_INTENT,
+        PAY_NOW,
+        PAY_LATER,
+        DECLINED,
+        WRONG_NUMBER,
+        DISPUTE,
+    )
 )
 
 LANGUAGE_HINTS = {

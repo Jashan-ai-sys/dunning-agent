@@ -42,12 +42,14 @@ def test_happy_path_reaches_pay_now():
     w.transition("identity_confirmed")
     assert w.node.id == "explain"
     w.transition("acknowledged")
+    assert w.node.id == "reason_inquiry"
+    w.transition("reason_given")
     assert w.node.id == "ask_intent"
     w.transition("pay_now")
 
     assert w.finished
     assert w.intent is CallIntent.RETRY_NOW
-    assert w.path == ("greet", "explain", "ask_intent", "pay_now")
+    assert w.path == ("greet", "explain", "reason_inquiry", "ask_intent", "pay_now")
 
 
 def test_wrong_number_exits_at_the_greeting():
@@ -82,6 +84,7 @@ def test_every_branch_from_ask_intent(label, expected):
     w = walker()
     w.transition("identity_confirmed")
     w.transition("acknowledged")
+    w.transition("reason_given")
     w.transition(label)
     assert w.intent is expected
 
@@ -156,6 +159,7 @@ def test_transition_speech_is_rendered_when_present():
     w = walker()
     w.transition("identity_confirmed")
     w.transition("acknowledged")
+    w.transition("reason_given")
     speech = w.transition_speech("pay_now")
     assert speech and "लिंक" in speech
 
@@ -199,12 +203,19 @@ def test_observations_survive_a_full_conversation_in_order():
     w = walker()
     w.transition("identity_confirmed", utterance="haan")
     w.transition("acknowledged", utterance="achha, ab kya karun")
+    w.transition("reason_given", utterance="pata nahi, balance kam tha shayad")
     w.transition("pay_now", utterance="link bhej dijiye")
 
-    assert [o.node_id for o in w.observations] == ["greet", "explain", "ask_intent"]
+    assert [o.node_id for o in w.observations] == [
+        "greet",
+        "explain",
+        "reason_inquiry",
+        "ask_intent",
+    ]
     assert [o.label for o in w.observations] == [
         "identity_confirmed",
         "acknowledged",
+        "reason_given",
         "pay_now",
     ]
     assert all(o.accepted for o in w.observations)
@@ -241,3 +252,49 @@ def test_transition_after_the_call_ends_is_not_recorded():
     with pytest.raises(InvalidTransition, match="already ended"):
         w.transition("identity_confirmed", utterance="hello")
     assert len(w.observations) == before
+
+
+# --- reason_inquiry and the financial-difficulty branch -----------------
+
+
+def test_reason_is_asked_before_options_are_offered():
+    """Offering payment options before asking why reads as a script."""
+    w = walker()
+    w.transition("identity_confirmed")
+    w.transition("acknowledged")
+    assert w.node.id == "reason_inquiry"
+    assert "pay_now" not in w.instructions()
+
+
+@pytest.mark.parametrize("start", ["reason_inquiry", "ask_intent"])
+def test_financial_difficulty_is_not_treated_as_a_refusal(start):
+    """"I cannot afford it" is a later, not a no. Routing it to `declined`
+    would close the case and stop contact on someone who never refused."""
+    w = walker()
+    w.transition("identity_confirmed")
+    w.transition("acknowledged")
+    if start == "ask_intent":
+        w.transition("reason_given")
+
+    w.transition("financial_difficulty", utterance="abhi paise nahi hain")
+
+    assert w.intent is CallIntent.RETRY_LATER
+    assert w.intent is not CallIntent.DECLINED
+
+
+def test_dispute_is_reachable_from_reason_inquiry():
+    w = walker()
+    w.transition("identity_confirmed")
+    w.transition("acknowledged")
+    w.transition("disputes_charge", utterance="maine to pay kar diya tha")
+    assert w.intent is CallIntent.DISPUTE
+
+
+def test_reason_inquiry_asks_once_and_listens():
+    """A stage that lectures is the failure mode; the prompt says one question."""
+    w = walker()
+    w.transition("identity_confirmed")
+    w.transition("acknowledged")
+    text = w.instructions()
+    assert "one question" in text
+    assert "do not ask twice" in text

@@ -87,13 +87,17 @@ convergence on rules we derived separately:
 
 Worth stealing:
 
-- **Node they have that we lack: `reason_inquiry`** — ask *why* the payment
-  failed before offering options. Cheap to add, and it makes the call feel less
-  like a script.
-- **Objection handlers** keyed by trigger: `already_paid`, `dispute_amount`,
-  `financial_difficulty`, `harassment`. We cover `dispute` and `declined`; the
-  other two are real and we would fall through to the wrong branch.
-- **LLM params**: `temperature=0.2`, `max_tokens=120`. We set neither.
+- ~~**Node they have that we lack: `reason_inquiry`**~~ — **adopted.** Asks why
+  the payment failed before offering options, so the call stops reading like a
+  script. Sits between `explain` and `ask_intent`.
+- ~~**Objection handler: `financial_difficulty`**~~ — **adopted**, reachable
+  from both `reason_inquiry` and `ask_intent`. This one was a live bug: "I
+  cannot afford it right now" would previously have fallen to `declined`, which
+  closes the case *and* suppresses further contact on someone who never
+  refused. It now routes to `retry_later`.
+- Still open: `already_paid` and `harassment` as distinct triggers. `already_paid`
+  currently lands on `dispute`, which is defensible; `harassment` has no branch.
+- ~~**LLM params**: `temperature=0.2`, `max_tokens=120`~~ — **adopted.**
 - **Prioritisation scoring**: weighted buckets over `days_past_due` (40) and
   `overdue_amount` (30). Our orchestrator orders by `halted_at` then
   `created_at` — a weighted score is strictly better for choosing who to call
