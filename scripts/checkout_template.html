@@ -24,16 +24,22 @@
   <div class="sub">__SUBSCRIPTION__ &middot; &#8377;__AMOUNT__</div>
 
   <div class="card">
-    <h2>Step 1 &mdash; authorise once</h2>
-    <p>Cards must be <strong>recurring-eligible</strong>. A plain
-      <code>4111 1111 1111 1111</code> is rejected with
-      <em>"This card is not eligible for recurring payments"</em>.</p>
+    <h2>Step 1 &mdash; authorise once (this should SUCCEED)</h2>
+    <p><strong>Skip cards.</strong> Test cards keep getting refused here:
+      <code>4111&nbsp;1111&nbsp;1111&nbsp;1111</code> is
+      <em>"not eligible for recurring payments"</em>, and
+      <code>5104&nbsp;0155&nbsp;5555&nbsp;5558</code> is
+      <em>"international cards are not supported"</em>. Which domestic cards are
+      recurring-eligible varies by account, so it is not worth hunting.</p>
     <ol>
-      <li>Try the Mastercard test card <code>5104 0155 5555 5558</code>, any future expiry, any CVV.</li>
-      <li>If cards keep refusing, switch to <strong>EMandate</strong> or <strong>UPI</strong>
-        in the checkout&rsquo;s left-hand menu &mdash; those authorise without a card.</li>
-      <li>Authorisation itself should <strong>succeed</strong>. We fail the charge afterwards.</li>
+      <li>Pick <strong>UPI</strong> in the left-hand menu and enter
+        <code>success@razorpay</code>.</li>
+      <li>If UPI is not offered, pick <strong>EMandate</strong> and choose any
+        test bank.</li>
     </ol>
+    <p class="warn">Razorpay documents <code>success@razorpay</code> for one-time
+      payments and does not explicitly confirm it for Autopay mandates &mdash; try it,
+      but fall back to EMandate rather than spending the evening on this.</p>
   </div>
 
   <div class="card">
