@@ -153,13 +153,19 @@ serves our Sarvam-30B -- supports draft-model speculative decoding plus n-gram
 and EAGLE-style variants needing no separate drafter. DSpark's edge is a
 purpose-trained drafter with high acceptance rates, not access to the method.
 
-**Evaluation gate, in this order:**
+**Given the model is now chosen, the gate becomes a mitigation plan:**
 
-1. Hinglish quality, as a pass/fail gate. 20 turns from the real graph, scored
-   by a Hindi speaker. Fail this and latency is irrelevant.
-2. p95 first-token latency, measured through the real `transition` tool call.
-3. Sarvam-30B with vLLM speculative decoding enabled, as the control -- it may
-   close most of the gap while keeping the Indic-native model.
+1. Score 20 real graph turns for Hindi quality with a native speaker. This is
+   now a measurement, not a veto -- but it tells us how much of step 2 we need.
+2. If quality is weak, move Hindi generation out of the model: put reviewed
+   Hindi lines on each node and leave the LLM only the classification job
+   (pick one of ~4 edge labels). A 1-2B model classifying into four buckets is
+   a solved problem; free-form Hindi generation is the risky half. Fixed
+   wording on a billing call is also easier to defend for compliance.
+3. Scripting can be partial -- fix the greeting, the amount and the sign-offs,
+   where being wrong is expensive, and leave the middle to the model.
+4. p95 first-token latency through the real `transition` tool call, once
+   quality is settled.
 
 Roughly two hours of work, and it replaces a guess with a number.
 
@@ -240,9 +246,12 @@ hosted stack pays three times per turn. That is the one place local should be
 ## Open decisions
 
 1. ASR base: IndicConformer-600M vs `vasista22` Whisper-large-v2.
-2. LLM: Sarvam-30B (already debugged, Indic-native) vs LFM2.5-2.6B-DSpark
-   (faster, Hindi unbenchmarked) vs Sarvam-30B with vLLM speculative decoding.
-   Gate on Hinglish quality before comparing latency.
+2. ~~LLM choice~~ **decided**: LFM2.5 + DSpark. Sarvam-30B is too costly to
+   serve for this project. Size: start at 8B-A1B -- multilingual capacity
+   tracks *total* parameters while decode cost tracks *active* ones (~1B), so
+   the MoE is the one point where the Hindi risk and the latency budget do not
+   fight. Fall back to 2.6B if VRAM is tight.
+   Wired as `LLM_PROVIDER=local` against any OpenAI-compatible server.
 3. Whether to self-host LiveKit, or accept LiveKit Cloud for signalling since it
    never sees decrypted audio content we care about. Lower priority than the
    model layer.

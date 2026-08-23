@@ -53,6 +53,14 @@ class Settings(BaseSettings):
     # "unknown" lets Sarvam detect the language per utterance. Forcing en-IN
     # mis-transcribes the Hindi half of a Hinglish sentence.
     sarvam_language: str = "unknown"
+    # "vertex" | "local". "local" points at any OpenAI-compatible server --
+    # SGLang and vLLM both expose one -- so a self-hosted SLM needs no code
+    # change, only these three values.
+    llm_provider: str = "vertex"
+    local_llm_base_url: str = "http://localhost:30000/v1"
+    local_llm_model: str = "LiquidAI/LFM2.5-8B-A1B"
+    local_llm_api_key: str = "not-needed"
+
     gemini_model: str = "gemini-2.5-flash"
     # Vertex AI rather than the Gemini Developer API: authenticates with ADC or
     # a service account instead of an API key, and keeps the LLM inside the same

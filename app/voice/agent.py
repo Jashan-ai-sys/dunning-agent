@@ -18,7 +18,7 @@ import logging
 from dotenv import load_dotenv
 from livekit import agents, api
 from livekit.agents import Agent, AgentServer, AgentSession, RunContext, function_tool
-from livekit.plugins import cartesia, google, sarvam, silero
+from livekit.plugins import cartesia, google, openai, sarvam, silero
 
 from app.config import get_settings
 from app.voice.flow import DUNNING_FLOW, language_hint
@@ -105,7 +105,7 @@ class NodeAgent(Agent):
         return NodeAgent(self._state)
 
 
-def build_llm() -> google.LLM:
+def build_llm():
     """Gemini via Vertex AI by default.
 
     Vertex authenticates with ADC or a service account rather than an API key,
@@ -114,6 +114,17 @@ def build_llm() -> google.LLM:
     Developer API and GOOGLE_API_KEY.
     """
     settings = get_settings()
+
+    if settings.llm_provider == "local":
+        # SGLang and vLLM both speak the OpenAI protocol, so the same client
+        # covers either. Speculative decoding (DSpark, n-gram, EAGLE) is a
+        # server-side setting and is invisible from here.
+        return openai.LLM(
+            model=settings.local_llm_model,
+            base_url=settings.local_llm_base_url,
+            api_key=settings.local_llm_api_key,
+        )
+
     if not settings.google_use_vertex:
         return google.LLM(model=settings.gemini_model)
 
