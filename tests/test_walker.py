@@ -163,3 +163,81 @@ def test_transition_speech_is_rendered_when_present():
 def test_transition_speech_is_none_when_the_edge_has_no_line():
     w = walker()
     assert w.transition_speech("identity_confirmed") is None
+
+
+# --- observation capture (training data for offline prompt optimisation) ---
+
+
+def test_accepted_transition_is_recorded_with_its_utterance():
+    w = walker()
+    w.transition("identity_confirmed", utterance="haan ji, Asha bol rahi hoon")
+
+    assert len(w.observations) == 1
+    obs = w.observations[0]
+    assert obs.node_id == "greet"          # the node it was decided AT
+    assert obs.label == "identity_confirmed"
+    assert obs.accepted is True
+    assert obs.utterance == "haan ji, Asha bol rahi hoon"
+    assert obs.rejection is None
+
+
+def test_rejected_label_is_recorded_as_a_hard_negative():
+    """A label the model reached for and could not have is worth more than an
+    example we would have thought to write."""
+    w = walker()
+    with pytest.raises(InvalidTransition):
+        w.transition("pay_now", utterance="kuch bhi")
+
+    assert len(w.observations) == 1
+    obs = w.observations[0]
+    assert obs.accepted is False
+    assert obs.label == "pay_now"
+    assert "not a valid move" in obs.rejection
+
+
+def test_observations_survive_a_full_conversation_in_order():
+    w = walker()
+    w.transition("identity_confirmed", utterance="haan")
+    w.transition("acknowledged", utterance="achha, ab kya karun")
+    w.transition("pay_now", utterance="link bhej dijiye")
+
+    assert [o.node_id for o in w.observations] == ["greet", "explain", "ask_intent"]
+    assert [o.label for o in w.observations] == [
+        "identity_confirmed",
+        "acknowledged",
+        "pay_now",
+    ]
+    assert all(o.accepted for o in w.observations)
+
+
+def test_utterance_is_optional_so_traversal_never_depends_on_it():
+    w = walker()
+    w.transition("identity_confirmed")
+    assert w.observations[0].utterance is None
+    assert w.node.id == "explain"
+
+
+def test_observations_serialise_for_storage():
+    w = walker()
+    w.transition("identity_confirmed", utterance="haan")
+    rows = w.observations_as_dicts()
+
+    assert rows == [
+        {
+            "node_id": "greet",
+            "label": "identity_confirmed",
+            "accepted": True,
+            "utterance": "haan",
+            "rejection": None,
+        }
+    ]
+
+
+def test_transition_after_the_call_ends_is_not_recorded():
+    """Nothing to learn from a move the graph never offered."""
+    w = walker()
+    w.transition("not_the_customer", utterance="galat number")
+    before = len(w.observations)
+    with pytest.raises(InvalidTransition, match="already ended"):
+        w.transition("identity_confirmed", utterance="hello")
+    assert len(w.observations) == before

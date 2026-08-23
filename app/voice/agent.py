@@ -87,6 +87,26 @@ class NodeAgent(Agent):
             await self.session.drain()
             await self.session.aclose()
 
+    @staticmethod
+    def _last_user_utterance(context: RunContext) -> str | None:
+        """The customer's most recent words, for the training record only.
+
+        Never used to decide anything -- the label alone drives traversal. Read
+        defensively: this is a convenience for offline prompt optimisation and
+        must not be able to fail a live call.
+        """
+        try:
+            items = getattr(context.session.history, "items", None) or []
+            for item in reversed(items):
+                if getattr(item, "role", None) == "user":
+                    content = getattr(item, "content", None)
+                    if isinstance(content, list):
+                        content = " ".join(str(c) for c in content)
+                    return str(content).strip() or None
+        except Exception:  # noqa: BLE001 - diagnostics must never break a call
+            logger.debug("could not read the last user utterance", exc_info=True)
+        return None
+
     @function_tool
     async def transition(self, context: RunContext, label: str) -> str:
         """Move the conversation to the next stage.
@@ -95,7 +115,7 @@ class NodeAgent(Agent):
         one of the labels listed in your instructions.
         """
         try:
-            self._state.walker.transition(label)
+            self._state.walker.transition(label, utterance=self._last_user_utterance(context))
         except InvalidTransition as exc:
             # Hand the error back to the model rather than failing the call --
             # it can pick a valid label or ask a clarifying question.

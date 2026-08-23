@@ -178,5 +178,10 @@ class VoiceCall(Base, TimestampMixin):
     detected_intent: Mapped[str | None] = mapped_column(String(32))
     #: Terminal node the conversation graph reached.
     final_node_id: Mapped[str | None] = mapped_column(String(64))
+    #: Labelled turns from the conversation graph: which node, what the
+    #: customer said, which edge label the model chose, and whether it was
+    #: valid. This is the training set for offline prompt optimisation --
+    #: collected from real traffic rather than invented.
+    transitions: Mapped[list | None] = mapped_column(JSONB)
     transcript: Mapped[str | None] = mapped_column(Text)
     error: Mapped[str | None] = mapped_column(Text)

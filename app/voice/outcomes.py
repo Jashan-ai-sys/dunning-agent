@@ -31,6 +31,8 @@ class CallResult:
     duration_seconds: int | None = None
     answered_at: datetime | None = None
     error: str | None = None
+    #: Labelled graph turns, from GraphWalker.observations_as_dicts().
+    transitions: list[dict] | None = None
 
 
 async def apply_call_result(
@@ -52,6 +54,7 @@ async def apply_call_result(
     call.detected_intent = result.intent
     call.final_node_id = result.final_node_id
     call.transcript = result.transcript
+    call.transitions = result.transitions or None
     call.duration_seconds = result.duration_seconds
     call.answered_at = result.answered_at
     call.error = result.error
