@@ -253,6 +253,12 @@ instance that cannot reach Cloud SQL.
 - [x] **Phase 5** — Batch metrics: cases, ₹ at risk, ₹ recovered, recovery rate
       (`uv run python -m app.report`)
 
+## Design notes
+
+- [Fully local voice stack](docs/local-voice-architecture.md) — the proposed
+  self-hosted STT/LLM/TTS design, why the entity-dense ASR gap matters more
+  than headline WER, and what it would cost to close it. Proposed, not built.
+
 ## Known gaps
 
 - **`subscription.pending` with no open case — still open.** If Razorpay's
