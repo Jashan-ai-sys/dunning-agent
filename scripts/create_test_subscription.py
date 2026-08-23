@@ -182,15 +182,19 @@ async def main() -> None:
         print(json.dumps(subscription, indent=2)[:600])
     print("=" * 70)
     print(
-        "\nNext:\n"
-        "  1. Open authorise.html and pay with a Razorpay test card.\n"
-        "  2. To make a charge FAIL, enter an OTP shorter than 4 digits.\n"
-        "  3. Razorpay then fires payment.failed with a real invoice_id at\n"
-        "     the webhook endpoint, and a recovery case opens by itself.\n"
+        "\nStep 1 - authorise once (this should SUCCEED):\n"
+        "  Open authorise.html. The card must be RECURRING-ELIGIBLE; a plain\n"
+        "  4111 1111 1111 1111 is refused with 'not eligible for recurring\n"
+        "  payments'. Try 5104 0155 5555 5558, or switch to EMandate / UPI in\n"
+        "  the checkout, which authorise without a card at all.\n"
+        "\nStep 2 - fail a charge whenever you want:\n"
+        "  Dashboard > Subscriptions > this subscription > 'Charge this now',\n"
+        "  then choose FAILURE. That raises a genuine payment.failed with a\n"
+        "  real invoice_id and moves the subscription to pending. No OTP\n"
+        "  games, no waiting for a billing cycle, and repeatable for a retake.\n"
         "\nWatch it land:\n"
         "  gcloud logging read 'resource.labels.service_name=\"dunning-agent\"' \\\n"
-        "    --project dunning-agent --freshness=10m --limit=20\n"
-        "\nRemember: test card tokens expire after 3 days."
+        "    --project dunning-agent --freshness=10m --limit=20"
     )
 
 
