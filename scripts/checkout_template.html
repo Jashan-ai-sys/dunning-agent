@@ -24,14 +24,30 @@
   <div class="sub">__SUBSCRIPTION__ &middot; &#8377;__AMOUNT__</div>
 
   <div class="card">
-    <h2>To make the charge FAIL</h2>
+    <h2>Step 1 &mdash; authorise once</h2>
+    <p>Cards must be <strong>recurring-eligible</strong>. A plain
+      <code>4111 1111 1111 1111</code> is rejected with
+      <em>"This card is not eligible for recurring payments"</em>.</p>
     <ol>
-      <li>Pay with any Razorpay <strong>test card</strong> (e.g. <code>4111 1111 1111 1111</code>, any future expiry, any CVV).</li>
-      <li>On the OTP screen, enter <strong>fewer than 4 digits</strong> &mdash; e.g. <code>1</code>.</li>
-      <li>That is Razorpay's documented test-mode failure lever.</li>
+      <li>Try the Mastercard test card <code>5104 0155 5555 5558</code>, any future expiry, any CVV.</li>
+      <li>If cards keep refusing, switch to <strong>EMandate</strong> or <strong>UPI</strong>
+        in the checkout&rsquo;s left-hand menu &mdash; those authorise without a card.</li>
+      <li>Authorisation itself should <strong>succeed</strong>. We fail the charge afterwards.</li>
     </ol>
-    <p class="warn">A failed charge is the point. It fires <code>payment.failed</code>
-      with a real <code>invoice_id</code>, which opens a recovery case by itself.</p>
+  </div>
+
+  <div class="card">
+    <h2>Step 2 &mdash; fail the charge, on demand</h2>
+    <p>Do <strong>not</strong> fight with OTPs. Razorpay test mode can fire a charge
+      whenever you want and let you pick the outcome:</p>
+    <ol>
+      <li>Razorpay Dashboard &rarr; <strong>Subscriptions</strong> &rarr; open this subscription.</li>
+      <li>Click <strong>&ldquo;Charge this now&rdquo;</strong>.</li>
+      <li>Choose <strong>failure</strong> when it asks for the result.</li>
+    </ol>
+    <p class="warn">That fires a genuine <code>payment.failed</code> with a real
+      <code>invoice_id</code>, moves the subscription to <code>pending</code>, and opens
+      a recovery case by itself &mdash; no timing games, repeatable for a retake.</p>
   </div>
 
   <button id="go">Open Razorpay Checkout</button>
