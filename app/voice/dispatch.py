@@ -17,6 +17,7 @@ from livekit import api
 from app.channels import ContactResult
 from app.config import get_settings
 from app.models import Customer, RecoveryCase
+from app.voice.spoken import spoken_amount
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +57,11 @@ class LiveKitChannel:
                 "customer_name": customer.name or "there",
                 "preferred_language": customer.preferred_language,
                 "company_name": self._settings.company_name,
-                # Rupees, not paise: this string is read aloud.
-                "amount_rupees": f"{case.original_amount / 100:.0f}",
+                # Already in spoken form -- "5 लाख रुपये", not "500000".
+                "amount_spoken": spoken_amount(
+                    case.original_amount, customer.preferred_language
+                ),
+                "amount_paise": case.original_amount,
                 "failure_reason": case.failure_reason or "the bank declined it",
             }
         )

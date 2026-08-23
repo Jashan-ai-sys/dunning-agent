@@ -22,6 +22,7 @@ from livekit.plugins import cartesia, google, openai, sarvam, silero
 
 from app.config import get_settings
 from app.voice.flow import DUNNING_FLOW, language_hint
+from app.voice.spoken import spoken_amount
 from app.voice.walker import GraphWalker, InvalidTransition
 
 logger = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ server = AgentServer()
 #: exercised from the LiveKit console. Never used on a dispatched recovery call.
 SAMPLE_CONTEXT = {
     "customer_name": "Asha",
-    "amount_rupees": "499",
+    "amount_spoken": "499 रुपये",
     "failure_reason": "your card had insufficient funds",
     "preferred_language": "hi",
 }
@@ -123,12 +124,19 @@ def build_llm():
             model=settings.local_llm_model,
             base_url=settings.local_llm_base_url,
             api_key=settings.local_llm_api_key,
+            temperature=settings.llm_temperature,
         )
 
     if not settings.google_use_vertex:
-        return google.LLM(model=settings.gemini_model)
+        return google.LLM(
+            model=settings.gemini_model, temperature=settings.llm_temperature
+        )
 
-    kwargs: dict = {"vertexai": True, "location": settings.google_cloud_location}
+    kwargs: dict = {
+        "vertexai": True,
+        "location": settings.google_cloud_location,
+        "temperature": settings.llm_temperature,
+    }
     if settings.google_cloud_project:
         kwargs["project"] = settings.google_cloud_project
     return google.LLM(model=settings.gemini_model, **kwargs)
@@ -167,7 +175,12 @@ async def dunning_session(ctx: agents.JobContext) -> None:
     call_context = {
         "company_name": metadata.get("company_name", settings.company_name),
         "customer_name": metadata.get("customer_name", "there"),
-        "amount_rupees": metadata.get("amount_rupees", "0"),
+        # Pre-rendered rather than left to the model: a raw numeral plus a
+        # Latin "Rs" is the script flip that makes Hindi voices stumble.
+        "amount_spoken": metadata.get("amount_spoken")
+        or spoken_amount(
+            int(metadata.get("amount_paise", 0)), metadata.get("preferred_language")
+        ),
         "failure_reason": metadata.get("failure_reason", "the bank declined it"),
         "language_hint": language_hint(metadata.get("preferred_language")),
     }

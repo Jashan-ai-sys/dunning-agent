@@ -61,11 +61,34 @@ def test_room_name_is_derived_from_the_case(monkeypatch):
     assert LiveKitChannel.room_name(make_case(id=42)) == "recovery-42"
 
 
-def test_metadata_carries_rupees_not_paise(monkeypatch):
-    """The agent reads this aloud; 49900 would be spoken as forty-nine thousand."""
+def test_metadata_carries_a_spoken_amount_not_a_raw_numeral(monkeypatch):
+    """The agent reads this aloud. 49900 spoken as digits is a digit crawl, and
+    a Latin "Rs" inside a Devanagari sentence makes Hindi voices stumble."""
     configure(monkeypatch)
     metadata = json.loads(LiveKitChannel()._metadata(make_case(), make_customer()))
-    assert metadata["amount_rupees"] == "499"
+    # The fixture customer prefers Hinglish, so the unit word follows suit.
+    assert metadata["amount_spoken"] == "499 rupaye"
+    assert metadata["amount_paise"] == 49_900
+
+
+def test_spoken_amount_follows_the_customers_language(monkeypatch):
+    configure(monkeypatch)
+    hindi = json.loads(
+        LiveKitChannel()._metadata(make_case(), make_customer(preferred_language="hi"))
+    )
+    assert hindi["amount_spoken"] == "499 रुपये"
+
+
+def test_large_amounts_are_collapsed_before_they_reach_the_voice(monkeypatch):
+    """500000 read as digits is the failure the Blostem backend wrote a
+    normalizer to stop."""
+    configure(monkeypatch)
+    metadata = json.loads(
+        LiveKitChannel()._metadata(
+            make_case(original_amount=500_000_00), make_customer(preferred_language="hi")
+        )
+    )
+    assert metadata["amount_spoken"] == "5 लाख रुपये"
 
 
 def test_metadata_carries_everything_the_flow_needs(monkeypatch):

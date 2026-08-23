@@ -31,6 +31,7 @@ from sqlalchemy import select
 from app.config import get_settings
 from app.db import SessionLocal, engine
 from app.models import Customer, RecoveryCase
+from app.voice.spoken import spoken_amount
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -54,7 +55,7 @@ async def context_from_case(case_id: int) -> dict:
             "recovery_case_id": case.id,
             "customer_name": (customer.name if customer else None) or "there",
             "preferred_language": customer.preferred_language if customer else "hinglish",
-            "amount_rupees": f"{case.original_amount / 100:.0f}",
+            "amount_spoken": spoken_amount(case.original_amount, "hi"),
             "failure_reason": case.failure_reason or "the bank declined it",
         }
 
@@ -64,7 +65,7 @@ def sample_context() -> dict:
         "recovery_case_id": 0,
         "customer_name": "Asha",
         "preferred_language": "hi",
-        "amount_rupees": "499",
+        "amount_spoken": "499 रुपये",
         "failure_reason": "your card had insufficient funds",
     }
 
@@ -117,7 +118,7 @@ async def main() -> None:
         template.replace("__URL__", settings.livekit_url)
         .replace("__TOKEN__", token)
         .replace("__ROOM__", args.room)
-        .replace("__AMOUNT__", context["amount_rupees"])
+        .replace("__AMOUNT__", context["amount_spoken"])
         .replace("__CUSTOMER__", context["customer_name"])
     )
     out = Path(__file__).resolve().parents[1] / "join.html"
@@ -125,7 +126,7 @@ async def main() -> None:
 
     print(f"dispatched '{settings.livekit_agent_name}' into room '{args.room}'")
     print(f"  customer : {context['customer_name']}")
-    print(f"  amount   : Rs {context['amount_rupees']}")
+    print(f"  amount   : {context['amount_spoken']}")
     print(f"  language : {context['preferred_language']}")
     print()
     print()

@@ -14,7 +14,7 @@ from app.voice.walker import GraphWalker, InvalidTransition
 CONTEXT = {
     "company_name": "Acme",
     "customer_name": "Asha",
-    "amount_rupees": "499",
+    "amount_spoken": "499 रुपये",
     "failure_reason": "insufficient funds",
     "language_hint": "in Hinglish",
 }

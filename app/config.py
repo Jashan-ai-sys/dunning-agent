@@ -61,6 +61,12 @@ class Settings(BaseSettings):
     local_llm_model: str = "LiquidAI/LFM2.5-8B-A1B"
     local_llm_api_key: str = "not-needed"
 
+    # Blostem's production debt-recovery template runs 0.2 / 120. A dunning
+    # call wants consistency over flair, and a cap keeps turns to the one or
+    # two sentences a phone call can carry.
+    llm_temperature: float = 0.2
+    llm_max_tokens: int = 120
+
     gemini_model: str = "gemini-2.5-flash"
     # Vertex AI rather than the Gemini Developer API: authenticates with ADC or
     # a service account instead of an API key, and keeps the LLM inside the same

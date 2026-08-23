@@ -17,7 +17,7 @@ from app.voice.intents import OUTCOMES, CallIntent, outcome_for
 CONTEXT = {
     "company_name": "Acme",
     "customer_name": "Asha",
-    "amount_rupees": "499",
+    "amount_spoken": "499 रुपये",
     "failure_reason": "insufficient funds",
     "language_hint": "in Hinglish",
 }
@@ -197,7 +197,7 @@ def test_flow_renders_with_the_documented_context():
 def test_identity_is_confirmed_before_billing_details_are_revealed():
     """The greet node must not leak the amount to whoever picks up."""
     greet = DUNNING_FLOW.node("greet")
-    assert "amount_rupees" not in template_variables(greet.prompt)
+    assert "amount_spoken" not in template_variables(greet.prompt)
     assert {e.label for e in greet.edges} == {"identity_confirmed", "not_the_customer"}
 
 

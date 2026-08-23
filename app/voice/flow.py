@@ -80,7 +80,7 @@ EXPLAIN = Node(
     kind=NodeKind.AGENT,
     prompt=(
         SYSTEM_STYLE
-        + "\n\nTell them their subscription payment of Rs {amount_rupees} did not go "
+        + "\n\nTell them their subscription payment of {amount_spoken} did not go "
         "through. If it helps, mention the reason: {failure_reason}. Be matter of "
         "fact, not accusatory -- most failures are bank-side, not the customer's "
         "fault. Then pause for their reaction."
@@ -151,7 +151,8 @@ PAY_NOW = Node(
     prompt=(
         LANGUAGE_RULE
         + "\n\nConfirm you are sending a secure payment link right now, tell them it "
-        "is for Rs {amount_rupees}, thank them, and end the call."
+        "is for {amount_spoken}, thank them, and end the call. Say the amount "
+        "exactly as written -- it is already in spoken form."
     ),
 )
 
