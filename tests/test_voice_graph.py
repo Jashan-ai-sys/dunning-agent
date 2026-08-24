@@ -265,20 +265,32 @@ def test_language_hint_follows_the_customer_preference(preference, expected_frag
 
 def test_every_node_demands_devanagari():
     """Romanised Hindi is what we are ruling out: a Hindi voice stumbles at
-    script boundaries, so Hindi must never come back transliterated."""
+    script boundaries, so Hindi must never come back transliterated.
+
+    Asserted against preamble + stage, which is everything the model is under
+    at that node. The rule lives in the preamble now so it can be cached, but
+    it has to reach every node exactly as before.
+    """
+    preamble = DUNNING_FLOW.render_preamble(CONTEXT)
     for node_ in DUNNING_FLOW.nodes:
-        prompt = DUNNING_FLOW.render(node_.id, CONTEXT)
+        prompt = f"{preamble}\n\n{DUNNING_FLOW.render(node_.id, CONTEXT)}"
         assert "Devanagari" in prompt
         assert "Never romanise Hindi" in prompt
 
 
 def test_the_rule_names_the_romanisations_it_forbids():
     """A bare instruction drifts; concrete negative examples hold better."""
-    prompt = DUNNING_FLOW.render("greet", CONTEXT)
-    assert "haan ji" in prompt and "हाँ जी" in prompt
+    preamble = DUNNING_FLOW.render_preamble(CONTEXT)
+    assert "haan ji" in preamble and "हाँ जी" in preamble
 
 
 def test_language_rule_is_marked_as_overriding():
     """It has to win against the per-customer preferred-language hint."""
-    prompt = DUNNING_FLOW.render("greet", CONTEXT)
-    assert "overrides every other instruction" in prompt
+    assert "overrides every other instruction" in DUNNING_FLOW.render_preamble(CONTEXT)
+
+
+def test_no_stage_repeats_the_preamble():
+    """The whole point of the split: if a node re-embeds the shared block, the
+    cached prefix is followed by a duplicate of itself on every turn."""
+    for node_ in DUNNING_FLOW.nodes:
+        assert "Never romanise Hindi" not in DUNNING_FLOW.render(node_.id, CONTEXT)

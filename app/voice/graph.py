@@ -63,6 +63,11 @@ class Node:
 @dataclass(frozen=True)
 class ConversationGraph:
     nodes: tuple[Node, ...]
+    #: Instructions that hold for the whole call, independent of stage. Kept
+    #: apart from the node prompts so a provider can be handed a stable prefix
+    #: (Gemini's ``system_instruction``) and cache it across turns, instead of
+    #: re-reading the same paragraphs on every stage change.
+    preamble: str = ""
     _by_id: dict[str, Node] = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -84,7 +89,7 @@ class ConversationGraph:
     @property
     def variables(self) -> set[str]:
         """Every template variable the flow needs to be rendered."""
-        found: set[str] = set()
+        found: set[str] = template_variables(self.preamble)
         for node in self.nodes:
             found |= template_variables(node.prompt)
             for edge in node.edges:
@@ -156,6 +161,10 @@ class ConversationGraph:
     def render(self, node_id: str, context: dict[str, Any]) -> str:
         """Fill a node's prompt with call context."""
         return render_template(self.node(node_id).prompt, context)
+
+    def render_preamble(self, context: dict[str, Any]) -> str:
+        """Fill the call-wide preamble with call context."""
+        return render_template(self.preamble, context)
 
     def missing_variables(self, context: dict[str, Any]) -> set[str]:
         return self.variables - set(context)

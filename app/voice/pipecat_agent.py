@@ -110,7 +110,10 @@ def normalize_for_speech(text: str, language: str = "hi") -> str:
 HINDI_CLIP_GROUPS = {
     "continue": ["हूँ।", "जी।", "अच्छा।", "हाँ।"],
     "affirm": ["जी हाँ।", "हाँ जी।", "बिल्कुल।"],
-    "thinking": ["हम्म।", "जी...", "अच्छा..."],
+    # No trailing ellipsis on "अच्छा": Cartesia renders the pause literally and
+    # returned a 1.5s clip, three times the others. A backchannel that long
+    # stops being a murmur underneath the customer and starts interrupting.
+    "thinking": ["हम्म।", "जी...", "अच्छा"],
     "surprise": ["अच्छा?", "ओह।", "अरे।"],
 }
 
@@ -240,13 +243,19 @@ def resolve_sarvam_model(configured: str) -> str:
     return fallback
 
 
-def build_llm():
+def build_llm(system_instruction: str | None = None):
     """Gemini via Vertex AI by default, matching the LiveKit path.
 
     Vertex authenticates with a service account rather than an API key, which
     keeps the LLM inside the same GCP project and IAM boundary as everything
     else. Pipecat splits these across two classes where LiveKit used one flag,
     so the choice is explicit here.
+
+    ``system_instruction`` is passed to the service rather than left as a system
+    message in the context, and the two are mutually exclusive -- Pipecat warns
+    and ignores the context message if both are set. Gemini sends it as a
+    separate field ahead of the conversation, which makes it the front of the
+    cacheable prefix.
     """
     settings = get_settings()
 
@@ -254,7 +263,9 @@ def build_llm():
         return GoogleLLMService(
             api_key=os.environ["GOOGLE_API_KEY"],
             settings=GoogleLLMService.Settings(
-                model=settings.gemini_model, temperature=settings.llm_temperature
+                model=settings.gemini_model,
+                temperature=settings.llm_temperature,
+                system_instruction=system_instruction,
             ),
         )
 
@@ -270,12 +281,14 @@ def build_llm():
         project_id=settings.google_cloud_project,
         location=settings.google_cloud_location,
         settings=GoogleVertexLLMService.Settings(
-            model=settings.gemini_model, temperature=settings.llm_temperature
+            model=settings.gemini_model,
+            temperature=settings.llm_temperature,
+            system_instruction=system_instruction,
         ),
     )
 
 
-def build_services(language: str) -> tuple:
+def build_services(language: str, system_instruction: str | None = None) -> tuple:
     """STT, LLM and TTS, configured exactly as the LiveKit path is."""
     settings = get_settings()
 
@@ -310,7 +323,7 @@ def build_services(language: str) -> tuple:
         mode="transcribe",
     )
 
-    llm = build_llm()
+    llm = build_llm(system_instruction)
 
     tts = CartesiaTTSService(
         api_key=os.environ["CARTESIA_API_KEY"],
@@ -399,9 +412,11 @@ class DunningSession:
         self.walker = GraphWalker(DUNNING_FLOW, context)
         self.language = context.get("_language", "hi")
         self.llm_context = LLMContext()
-        self.llm_context.set_messages(
-            [{"role": "system", "content": self.walker.instructions()}]
-        )
+        # No system message here on purpose: the preamble goes to the service as
+        # `system_instruction` (see build_llm), and Gemini would ignore a second
+        # one anyway. The context holds only the conversation, which is what
+        # makes it append-only and therefore cacheable.
+        self.llm_context.set_messages([self._stage_message()])
         self.finished = asyncio.Event()
         self.recovery_case_id: int | None = context.get("_recovery_case_id")
         self.voice_call_id: int | None = None
@@ -451,16 +466,32 @@ class DunningSession:
 
         logger.info("transition %s -> %s", label, self.walker.node.id)
         self.apply_backchannel_policy()
-        # Replacing the system message is the handoff: the model only ever sees
-        # the stage it is actually in.
-        self.llm_context.set_messages(
-            [{"role": "system", "content": self.walker.instructions()}]
-            + [m for m in self.llm_context.get_messages() if m.get("role") != "system"]
+
+        # The handoff rides on the tool result rather than a rewritten system
+        # message. Rewriting changed the prefix on every stage change, so every
+        # turn after a transition was a guaranteed cache miss; this only ever
+        # appends, so the prefix the model has already seen stays byte-identical.
+        await params.result_callback(
+            {
+                "moved_to": self.walker.node.id,
+                "instructions": self.walker.stage_instructions(),
+            }
         )
-        await params.result_callback({"moved_to": self.walker.node.id})
 
         if self.walker.finished:
             self.finished.set()
+
+    def _stage_message(self) -> dict:
+        """The opening stage, as the first turn of the conversation.
+
+        A `system` role would collide with `system_instruction`; Gemini keeps
+        the latter and warns. `user` would read as the customer speaking. The
+        stage is framed as a directive the assistant has just been handed.
+        """
+        return {
+            "role": "user",
+            "content": f"[STAGE: {self.walker.node.id}]\n{self.walker.stage_instructions()}",
+        }
 
     def apply_backchannel_policy(self) -> None:
         """Silence the listening sounds where agreement would be misread.
@@ -586,7 +617,9 @@ def recovery_mcp() -> MCPClient:
 
 async def run_call(transport, session: DunningSession) -> DunningSession:
     """Wire and run one conversation. Returns the session for its outcome."""
-    stt, llm, tts = build_services(session.language)
+    # The preamble is fixed for the whole call, so it is handed to the service
+    # once and never re-sent -- that is the prefix Gemini caches.
+    stt, llm, tts = build_services(session.language, session.walker.preamble())
 
     # `transition` stays in-process: it is graph traversal, not an external
     # capability, and it must not be able to fail over a transport.

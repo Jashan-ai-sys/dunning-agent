@@ -34,6 +34,11 @@ Hindi in Devanagari. Only if they speak plain English throughout should you
 answer in English. Judge this from what they actually just said, not from their
 name or where they are calling from."""
 
+#: Everything that is true for the whole call, and changes at no point during
+#: it. Kept in one piece deliberately: it is sent to Gemini as
+#: ``system_instruction`` and forms the cacheable prefix of every request, so
+#: anything that varies per stage must stay out of it or the prefix changes and
+#: the cache misses on every single turn.
 SYSTEM_STYLE = (
     """You are a polite billing assistant for {company_name}, calling
 {customer_name} about a subscription payment that failed.
@@ -48,7 +53,10 @@ turn after that.
 Keep every turn to one or two short sentences -- this is a phone call, not an
 essay. Never ask for card, CVV, OTP or UPI PIN details; the customer pays through
 a secure link we send, never over the phone. If the customer sounds annoyed, stay
-calm and offer to end the call."""
+calm and offer to end the call.
+
+The call moves through stages. You will be told which stage you are in and what
+to do there; follow the most recent stage instruction you have been given."""
 )
 
 
@@ -56,8 +64,7 @@ GREET = Node(
     id="greet",
     kind=NodeKind.START,
     prompt=(
-        SYSTEM_STYLE
-        + "\n\nOpen the call. Greet them, say you are calling from {company_name}, "
+        "Open the call. Greet them, say you are calling from {company_name}, "
         "and confirm you are speaking to {customer_name}. Do not mention the "
         "failed payment until identity is confirmed -- this is someone's billing "
         "information."
@@ -85,8 +92,7 @@ EXPLAIN = Node(
     id="explain",
     kind=NodeKind.AGENT,
     prompt=(
-        SYSTEM_STYLE
-        + "\n\nTell them their subscription payment of {amount_spoken} did not go "
+        "Tell them their subscription payment of {amount_spoken} did not go "
         "through. If it helps, mention the reason: {failure_reason}. Be matter of "
         "fact, not accusatory -- most failures are bank-side, not the customer's "
         "fault. Then pause for their reaction."
@@ -112,8 +118,7 @@ REASON_INQUIRY = Node(
     id="reason_inquiry",
     kind=NodeKind.AGENT,
     prompt=(
-        SYSTEM_STYLE
-        + "\n\nAsk one short question: do they know why it failed? An expired "
+        "Ask one short question: do they know why it failed? An expired "
         "card, a daily limit, or simply not enough balance that day. Do not "
         "lecture, do not offer options yet, and do not ask twice. This is one "
         "question, then you listen."
@@ -151,8 +156,7 @@ ASK_INTENT = Node(
     id="ask_intent",
     kind=NodeKind.AGENT,
     prompt=(
-        SYSTEM_STYLE
-        + "\n\nOffer exactly three options and let them choose: pay now via a link "
+        "Offer exactly three options and let them choose: pay now via a link "
         "you send on SMS, pay later at a time they pick, or stop the "
         "subscription. Do not push. Do not offer a discount -- you have no "
         "authority to change the amount.\n\n"
@@ -205,8 +209,7 @@ PAY_NOW = Node(
     kind=NodeKind.END,
     intent=CallIntent.RETRY_NOW,
     prompt=(
-        LANGUAGE_RULE
-        + "\n\nConfirm you are sending a secure payment link right now, tell them it "
+        "Confirm you are sending a secure payment link right now, tell them it "
         "is for {amount_spoken}, thank them, and end the call. Say the amount "
         "exactly as written -- it is already in spoken form."
     ),
@@ -217,8 +220,7 @@ PAY_LATER = Node(
     kind=NodeKind.END,
     intent=CallIntent.RETRY_LATER,
     prompt=(
-        LANGUAGE_RULE
-        + "\n\nAcknowledge their preferred time, say you will follow up then, thank "
+        "Acknowledge their preferred time, say you will follow up then, thank "
         "them and end the call. Do not promise an exact hour."
     ),
 )
@@ -228,8 +230,7 @@ DECLINED = Node(
     kind=NodeKind.END,
     intent=CallIntent.DECLINED,
     prompt=(
-        LANGUAGE_RULE
-        + "\n\nAccept their decision without pushing back even once. Confirm they "
+        "Accept their decision without pushing back even once. Confirm they "
         "will not be called again about this payment, thank them and end the call."
     ),
 )
@@ -239,8 +240,7 @@ WRONG_NUMBER = Node(
     kind=NodeKind.END,
     intent=CallIntent.WRONG_NUMBER,
     prompt=(
-        LANGUAGE_RULE
-        + "\n\nApologise briefly for the wrong number, say the number will be "
+        "Apologise briefly for the wrong number, say the number will be "
         "removed, and end the call. Do not reveal any billing details."
     ),
 )
@@ -250,14 +250,14 @@ DISPUTE = Node(
     kind=NodeKind.END,
     intent=CallIntent.DISPUTE,
     prompt=(
-        LANGUAGE_RULE
-        + "\n\nDo not argue and do not try to resolve it. Say a human colleague will "
+        "Do not argue and do not try to resolve it. Say a human colleague will "
         "review the account and get back to them, thank them and end the call."
     ),
 )
 
 
 DUNNING_FLOW = ConversationGraph(
+    preamble=SYSTEM_STYLE,
     nodes=(
         GREET,
         EXPLAIN,

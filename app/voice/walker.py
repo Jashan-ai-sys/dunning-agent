@@ -124,11 +124,21 @@ class GraphWalker:
 
     # -- prompting ------------------------------------------------------
 
-    def instructions(self) -> str:
-        """Rendered node prompt plus the menu of moves available right now.
+    def preamble(self) -> str:
+        """The half of the prompt that never changes during the call.
 
-        The menu is regenerated per node so the model only ever sees the
-        branches that apply, instead of the whole script.
+        Split out so a provider can cache it. Everything here is identical on
+        every turn; put anything stage-dependent in here and the cached prefix
+        breaks on the next transition.
+        """
+        return self.graph.render_preamble(self.context)
+
+    def stage_instructions(self) -> str:
+        """The half that changes: this node's prompt and its available moves.
+
+        Append-only by design -- the caller adds this to the conversation
+        rather than rewriting what came before, so the prefix keeps growing
+        instead of shifting.
         """
         rendered = self.graph.render(self._node.id, self.context)
         if self.finished:
@@ -144,6 +154,14 @@ class GraphWalker:
             "still ambiguous, ask one short clarifying question instead.\n\n"
             f"Available labels:\n{menu}"
         )
+
+    def instructions(self) -> str:
+        """Preamble and stage as one block, for callers that want a single prompt.
+
+        The LiveKit path hands a fresh Agent its whole instruction set on every
+        handoff, so it wants this. The Pipecat path splits the two halves.
+        """
+        return f"{self.preamble()}\n\n{self.stage_instructions()}"
 
     def transition_speech(self, label: str) -> str | None:
         """Optional line spoken while moving, rendered with call context."""
