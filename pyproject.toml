@@ -20,7 +20,7 @@ dependencies = [
 # the Blostem backend runs 0.0.108 and its frame processors are not API
 # compatible with 1.x, so only its pure-logic modules were ported.
 pipecat = [
-    "pipecat-ai[silero,google,cartesia,webrtc,mcp]~=1.7",
+    "pipecat-ai[cartesia,google,mcp,rnnoise,silero,webrtc]~=1.7",
     "sarvamai>=0.1.28",
     "python-dotenv",
     "pipecat-ai-prebuilt>=1.0.5",

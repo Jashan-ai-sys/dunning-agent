@@ -24,7 +24,7 @@ from livekit.plugins import cartesia, google, openai, sarvam, silero
 from app.config import get_settings
 from app.constants import CallStatus
 from app.store import utcnow
-from app.voice.flow import DUNNING_FLOW, language_hint
+from app.voice.flow import DUNNING_FLOW, halt_note, language_hint
 from app.voice.intents import CallIntent
 from app.voice.outcomes import CallResult
 from app.voice.persistence import (
@@ -296,6 +296,7 @@ async def dunning_session(ctx: agents.JobContext) -> None:
         ),
         "failure_reason": metadata.get("failure_reason", "the bank declined it"),
         "language_hint": language_hint(metadata.get("preferred_language")),
+        "halt_note": halt_note(metadata.get("subscription_halted")),
     }
     # Raises before the phone rings if the context is incomplete, rather than
     # reading a literal "{customer_name}" down the line.

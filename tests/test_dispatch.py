@@ -66,8 +66,9 @@ def test_metadata_carries_a_spoken_amount_not_a_raw_numeral(monkeypatch):
     a Latin "Rs" inside a Devanagari sentence makes Hindi voices stumble."""
     configure(monkeypatch)
     metadata = json.loads(LiveKitChannel()._metadata(make_case(), make_customer()))
-    # The fixture customer prefers Hinglish, so the unit word follows suit.
-    assert metadata["amount_spoken"] == "499 rupaye"
+    # The fixture customer prefers Hinglish, which is a register rather than a
+    # script -- the unit word is Devanagari, same as Hindi.
+    assert metadata["amount_spoken"] == "499 रुपये"
     assert metadata["amount_paise"] == 49_900
 
 
@@ -99,7 +100,10 @@ def test_metadata_carries_everything_the_flow_needs(monkeypatch):
     assert metadata["customer_name"] == "Asha Rao"
     assert metadata["preferred_language"] == "hinglish"
     assert metadata["company_name"] == "Acme"
-    assert metadata["failure_reason"] == "insufficient funds"
+    # Razorpay's English is mapped to the call's language before it ships:
+    # the agent reads this aloud inside a Devanagari sentence.
+    assert metadata["failure_reason"] == "खाते में पर्याप्त बैलेंस नहीं था"
+    assert metadata["subscription_halted"] is False
 
 
 def test_metadata_falls_back_when_the_customer_has_no_name(monkeypatch):
@@ -114,4 +118,4 @@ def test_metadata_falls_back_when_the_failure_reason_is_unknown(monkeypatch):
     metadata = json.loads(
         LiveKitChannel()._metadata(make_case(failure_reason=None), make_customer())
     )
-    assert metadata["failure_reason"] == "the bank declined it"
+    assert metadata["failure_reason"] == "बैंक ने पेमेंट पूरा नहीं किया"

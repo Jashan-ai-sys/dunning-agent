@@ -17,6 +17,7 @@ CONTEXT = {
     "amount_spoken": "499 रुपये",
     "failure_reason": "insufficient funds",
     "language_hint": "in Hinglish",
+    "halt_note": "The subscription is still active.",
 }
 
 

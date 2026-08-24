@@ -54,7 +54,9 @@ def test_no_latin_currency_token_in_hindi():
     "language,expected",
     [
         ("hi", "5 लाख रुपये"),
-        ("hinglish", "5 lakh rupaye"),
+        # Hinglish is a register, not a script: the same Devanagari words as
+        # Hindi, because the voice saying them is pinned to language="hi".
+        ("hinglish", "5 लाख रुपये"),
         ("en", "5 lakh rupees"),
     ],
 )

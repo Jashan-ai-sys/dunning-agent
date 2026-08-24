@@ -58,7 +58,8 @@ from pipecat_backchannel.processor import BackchannelProcessor
 from app.config import get_settings
 from app.constants import CallStatus
 from app.store import utcnow
-from app.voice.flow import DUNNING_FLOW, language_hint
+from app.voice.call_body import load_call_body
+from app.voice.flow import DUNNING_FLOW, halt_note, language_hint
 from app.voice.intents import CallIntent
 from app.voice.normalizers import (
     normalize_amounts_for_tts,
@@ -68,6 +69,7 @@ from app.voice.normalizers import (
 )
 from app.voice.outcomes import CallResult
 from app.voice.persistence import duration_since, finalise_call, open_call_record
+from app.voice.reasons import spoken_reason
 from app.voice.spoken import spoken_amount
 from app.voice.walker import GraphWalker, InvalidTransition
 
@@ -559,13 +561,14 @@ class DunningSession:
 
 
 def call_context(*, customer_name: str, amount_paise: int, failure_reason: str,
-                 language: str, company: str) -> dict:
+                 language: str, company: str, subscription_halted: bool = False) -> dict:
     context = {
         "company_name": company,
         "customer_name": customer_name,
         "amount_spoken": spoken_amount(amount_paise, language),
         "failure_reason": failure_reason,
         "language_hint": language_hint(language),
+        "halt_note": halt_note(subscription_halted),
     }
     context["_language"] = language
     return context
@@ -584,9 +587,10 @@ def context_from_body(body: dict) -> dict:
     context = call_context(
         customer_name=body.get("customer_name", "there"),
         amount_paise=int(body.get("amount_paise", 0)),
-        failure_reason=body.get("failure_reason", "बैंक ने पेमेंट अस्वीकार कर दिया"),
+        failure_reason=body.get("failure_reason") or spoken_reason(None, language),
         language=language,
         company=body.get("company_name", settings.company_name),
+        subscription_halted=bool(body.get("subscription_halted")),
     )
     # Pre-rendered amounts win over our own: the dispatcher may have spoken
     # forms we cannot reconstruct from paise alone.
@@ -706,17 +710,69 @@ async def _run_pipeline(session, transport, stt, llm, tts, aggregators) -> Dunni
 #:
 #: No VAD here: since 1.0 it lives on the user aggregator (see `build_vad`).
 TRANSPORT_PARAMS = {
-    "webrtc": lambda: TransportParams(audio_in_enabled=True, audio_out_enabled=True),
+    "webrtc": lambda: TransportParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+        audio_in_filter=build_noise_filter(),
+    ),
     "plivo": lambda: _telephony_params(),
     "exotel": lambda: _telephony_params(),
 }
+
+
+def build_noise_filter():
+    """Denoise the customer's audio before Sarvam ever sees it.
+
+    Chosen because it is the only filter with no vendor key: RNNoise runs
+    locally, so nothing about a billing call leaves our process to be cleaned
+    up. Krisp and Koala are better but each needs an account, and AIC needs
+    one too.
+
+    This matters more than it would on a laptop demo. Recovery calls land on
+    Indian mobile networks, and the background -- traffic, a shop, a television
+    -- is what drives Sarvam to hallucinate words that then get labelled as an
+    intent. Cleaning the input is cheaper than correcting a wrong branch.
+
+    Never fatal: a noisy call still recovers money.
+    """
+    try:
+        from pipecat.audio.filters.rnnoise_filter import RNNoiseFilter
+
+        return RNNoiseFilter()
+    except Exception:  # noqa: BLE001 - denoising is not worth failing a call
+        logger.warning("RNNoise unavailable; running without noise suppression")
+        return None
 
 
 def _telephony_params():
     """Imported lazily: pipecat[websocket] is not needed for the WebRTC demo."""
     from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
 
-    return FastAPIWebsocketParams(audio_in_enabled=True, audio_out_enabled=True)
+    return FastAPIWebsocketParams(
+        audio_in_enabled=True,
+        audio_out_enabled=True,
+        audio_in_filter=build_noise_filter(),
+    )
+
+
+async def _demo_body() -> dict:
+    """The body for a browser run, which arrives with none of its own.
+
+    `DUNNING_DEMO_CASE_ID` points the demo at a real row, so a call from the
+    browser exercises the whole loop -- link sent, case updated, action logged --
+    rather than only the conversation. Without it we fall back to the sample,
+    which writes nothing and is labelled as such in the log.
+    """
+    case_id = os.environ.get("DUNNING_DEMO_CASE_ID")
+    if case_id:
+        body = await load_call_body(int(case_id))
+        if body:
+            logger.info("demo call against recovery case %s", case_id)
+            return body
+        logger.warning("case %s not found; falling back to the sample", case_id)
+
+    logger.warning("no runner body; using the sample call context (nothing is persisted)")
+    return SAMPLE_BODY
 
 
 async def bot(runner_args: RunnerArguments) -> None:
@@ -726,9 +782,7 @@ async def bot(runner_args: RunnerArguments) -> None:
 
     The body carries the case, exactly as job metadata does on LiveKit.
     """
-    body = runner_args.body or SAMPLE_BODY
-    if not runner_args.body:
-        logger.warning("no runner body; using the sample call context")
+    body = runner_args.body or await _demo_body()
 
     # Raises before any audio flows if the context is incomplete, rather than
     # reading a literal "{customer_name}" down the line.

@@ -95,7 +95,7 @@ EXPLAIN = Node(
         "Tell them their subscription payment of {amount_spoken} did not go "
         "through. If it helps, mention the reason: {failure_reason}. Be matter of "
         "fact, not accusatory -- most failures are bank-side, not the customer's "
-        "fault. Then pause for their reaction."
+        "fault.\n\n{halt_note}\n\nThen pause for their reaction."
     ),
     edges=(
         Edge(
@@ -292,3 +292,30 @@ DEFAULT_LANGUAGE = "hi"
 def language_hint(preferred_language: str | None) -> str:
     key = preferred_language or DEFAULT_LANGUAGE
     return LANGUAGE_HINTS.get(key, LANGUAGE_HINTS[DEFAULT_LANGUAGE])
+
+
+#: What the agent adds once Razorpay has stopped retrying on its own. Kept as
+#: two fixed strings rather than left to the model: whether someone's service is
+#: about to stop is a fact about their account, and it must not be softened,
+#: dramatised, or invented on a call where it is not true.
+HALT_NOTES = {
+    True: (
+        "Their bank has stopped retrying this payment automatically, so the "
+        "subscription will not restart on its own. Say this plainly and only "
+        "once -- it is a fact, not a threat, and it is the reason paying today "
+        "actually matters. Do not name a cut-off date; you do not have one."
+    ),
+    False: (
+        "The subscription is still active and the bank may retry on its own. "
+        "Do not suggest their service is at risk -- it is not."
+    ),
+}
+
+
+def halt_note(subscription_halted: bool | None) -> str:
+    """The halt line, defaulting to the safe half.
+
+    Unknown is treated as not halted on purpose: wrongly telling someone their
+    subscription has stopped is the more damaging error of the two.
+    """
+    return HALT_NOTES[bool(subscription_halted)]

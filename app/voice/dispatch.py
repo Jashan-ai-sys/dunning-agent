@@ -17,7 +17,7 @@ from livekit import api
 from app.channels import ContactResult
 from app.config import get_settings
 from app.models import Customer, RecoveryCase
-from app.voice.spoken import spoken_amount
+from app.voice.call_body import call_body
 
 logger = logging.getLogger(__name__)
 
@@ -51,19 +51,7 @@ class LiveKitChannel:
 
     def _metadata(self, case: RecoveryCase, customer: Customer) -> str:
         return json.dumps(
-            {
-                "recovery_case_id": case.id,
-                "phone": customer.phone,
-                "customer_name": customer.name or "there",
-                "preferred_language": customer.preferred_language,
-                "company_name": self._settings.company_name,
-                # Already in spoken form -- "5 लाख रुपये", not "500000".
-                "amount_spoken": spoken_amount(
-                    case.original_amount, customer.preferred_language
-                ),
-                "amount_paise": case.original_amount,
-                "failure_reason": case.failure_reason or "the bank declined it",
-            }
+            call_body(case, customer, company_name=self._settings.company_name)
         )
 
     async def initiate(self, case: RecoveryCase, customer: Customer) -> ContactResult:

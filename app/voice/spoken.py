@@ -24,9 +24,16 @@ than becoming an unnatural "5.4321 लाख".
 from decimal import Decimal
 
 #: Unit words per language. Keys match ``Customer.preferred_language``.
+#:
+#: Hinglish takes the Devanagari words, not romanised ones. Hinglish is a
+#: speech register rather than a script: a Hinglish speaker says "लाख" and
+#: "रुपये" like any Hindi speaker, and the voice rendering it is pinned to
+#: ``language="hi"``. Feeding that voice "5 lakh rupaye" is the script flip
+#: this module exists to prevent -- it would read the Latin tokens as English
+#: mid-sentence, which is exactly the digit-crawl failure in a different coat.
 _UNITS = {
     "hi": {"thousand": "हज़ार", "lakh": "लाख", "crore": "करोड़", "rupees": "रुपये"},
-    "hinglish": {"thousand": "hazaar", "lakh": "lakh", "crore": "crore", "rupees": "rupaye"},
+    "hinglish": {"thousand": "हज़ार", "lakh": "लाख", "crore": "करोड़", "rupees": "रुपये"},
     "en": {"thousand": "thousand", "lakh": "lakh", "crore": "crore", "rupees": "rupees"},
 }
 
