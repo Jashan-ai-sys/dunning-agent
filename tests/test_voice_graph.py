@@ -257,19 +257,25 @@ def test_every_intent_has_an_outcome():
 
 @pytest.mark.parametrize(
     "preference,expected_fragment",
-    [("hinglish", "Hinglish"), ("hi", "Hindi"), ("en", "English"), (None, "Hindi")],
+    [("hinglish", "Devanagari"), ("hi", "Devanagari"), ("en", "English"), (None, "Devanagari")],
 )
 def test_language_hint_follows_the_customer_preference(preference, expected_fragment):
     assert expected_fragment in language_hint(preference)
 
 
-def test_every_node_carries_the_language_mirroring_rule():
-    """Sarvam runs in transcribe mode, so the model sees the customer's actual
-    language. It must answer in that language rather than defaulting."""
+def test_every_node_demands_devanagari():
+    """Romanised Hindi is what we are ruling out: a Hindi voice stumbles at
+    script boundaries, so Hindi must never come back transliterated."""
     for node_ in DUNNING_FLOW.nodes:
         prompt = DUNNING_FLOW.render(node_.id, CONTEXT)
-        assert "same language" in prompt
-        assert "same script" in prompt
+        assert "Devanagari" in prompt
+        assert "Never romanise Hindi" in prompt
+
+
+def test_the_rule_names_the_romanisations_it_forbids():
+    """A bare instruction drifts; concrete negative examples hold better."""
+    prompt = DUNNING_FLOW.render("greet", CONTEXT)
+    assert "haan ji" in prompt and "हाँ जी" in prompt
 
 
 def test_language_rule_is_marked_as_overriding():

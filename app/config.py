@@ -76,9 +76,16 @@ class Settings(BaseSettings):
     # saaras:v4 supersedes saarika:v2.5, which Sarvam is deprecating. Beta
     # access is per-key, so this is only usable with a whitelisted key.
     sarvam_stt_model: str = "saaras:v4"
-    # "unknown" lets Sarvam detect the language per utterance. Forcing en-IN
-    # mis-transcribes the Hindi half of a Hinglish sentence.
-    sarvam_language: str = "unknown"
+    # Sarvam needs BCP-47, not a bare two-letter code: "hi" is rejected with a
+    # validation error naming the legal set, "hi-IN" is accepted.
+    #
+    # "hi-IN" rather than "unknown" (auto-detect) is deliberate. Auto-detect
+    # decides per utterance, and on a short Hinglish reply it can land on
+    # English and hand back romanised text -- which the model then mirrors,
+    # producing exactly the "haan ji" output we do not want. Pinning Hindi
+    # makes Sarvam decode toward Devanagari at the source. Set "unknown" if a
+    # campaign genuinely needs language detection.
+    sarvam_language: str = "hi-IN"
     # "vertex" | "local". "local" points at any OpenAI-compatible server --
     # SGLang and vLLM both expose one -- so a self-hosted SLM needs no code
     # change, only these three values.

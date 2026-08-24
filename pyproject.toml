@@ -16,6 +16,15 @@ dependencies = [
 ]
 
 [dependency-groups]
+# Pipecat transport, as an alternative to LiveKit. Pinned to the current major:
+# the Blostem backend runs 0.0.108 and its frame processors are not API
+# compatible with 1.x, so only its pure-logic modules were ported.
+pipecat = [
+    "pipecat-ai[silero,google,cartesia,webrtc]~=1.7",
+    "sarvamai>=0.1.28",
+    "python-dotenv",
+]
+
 # Not installed by default: the webhook service's container has no need for
 # the voice stack, and these pull in onnxruntime and friends.
 voice = [

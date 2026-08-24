@@ -20,13 +20,19 @@ from app.voice.intents import CallIntent
 #: Carried by every node, terminals included. Sarvam runs in `transcribe` mode,
 #: so the model genuinely sees the customer's own language rather than an English
 #: translation -- which is what makes mirroring possible at all.
-LANGUAGE_RULE = """LANGUAGE -- this rule overrides every other instruction:
-Answer in the same language and the same script the customer just used. If their
-words arrive in Hindi, answer in Hindi. In English, answer in English. If they
-mix the two, mix them back the same way. Never move someone to a language they
-did not use, and never reply in a script they did not use. Judge this only from
-what they actually just said, not from their name or where they are calling
-from."""
+LANGUAGE_RULE = """LANGUAGE -- this rule overrides every other instruction.
+
+SCRIPT: Write every Hindi word in Devanagari. Never romanise Hindi. Do not write
+"haan ji", "aapka payment", "link bhej deta hoon" -- write "हाँ जी", "आपका
+पेमेंट", "लिंक भेज देता हूँ". Everyday English loanwords that Hindi speakers use
+are written in Devanagari too: लिंक, पेमेंट, कार्ड, बैंक, सब्सक्रिप्शन. This
+holds even when the customer types romanised Hindi at you -- read their meaning,
+answer in Devanagari.
+
+LANGUAGE: If the customer speaks Hindi, or Hindi mixed with English, answer in
+Hindi in Devanagari. Only if they speak plain English throughout should you
+answer in English. Judge this from what they actually just said, not from their
+name or where they are calling from."""
 
 SYSTEM_STYLE = (
     """You are a polite billing assistant for {company_name}, calling
@@ -263,8 +269,14 @@ DUNNING_FLOW = ConversationGraph(
 )
 
 LANGUAGE_HINTS = {
-    "hi": "in simple, everyday Hindi -- Devanagari, not transliterated",
-    "hinglish": "in natural Hinglish, mixing Hindi and English the way urban Indians do",
+    "hi": "in simple, everyday Hindi, written in Devanagari",
+    # Hinglish is a speech register, not a script. The English loanwords stay,
+    # but they are written in Devanagari like any Hindi speaker would -- never
+    # romanised, because a Hindi voice stumbles at script boundaries.
+    "hinglish": (
+        "in everyday spoken Hindi that naturally uses common English words "
+        "(लिंक, पेमेंट, कार्ड), all written in Devanagari"
+    ),
     "en": "in clear Indian English",
 }
 
