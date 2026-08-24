@@ -13,3 +13,6 @@ htmlcov/
 .DS_Store
 join.html
 authorise.html
+
+# Backchannel clips, recorded from Cartesia on first run
+.clip_cache/

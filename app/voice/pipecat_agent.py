@@ -27,6 +27,8 @@ from dotenv import load_dotenv
 from mcp import StdioServerParameters
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
+from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
+from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import EndFrame, LLMRunFrame
@@ -45,7 +47,13 @@ from pipecat.services.google.llm import GoogleLLMService
 from pipecat.services.mcp_service import MCPClient
 from pipecat.services.sarvam.stt import SarvamSTTService
 from pipecat.transports.base_transport import TransportParams
+from pipecat.turns.user_start import MinWordsUserTurnStartStrategy
+from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+from pipecat.turns.user_turn_strategies import UserTurnStrategies
 from pipecat.utils.text.base_text_filter import BaseTextFilter
+from pipecat_backchannel import Backchannel, BackchannelParams
+from pipecat_backchannel.cache import FileClipCache
+from pipecat_backchannel.processor import BackchannelProcessor
 
 from app.config import get_settings
 from app.constants import CallStatus
@@ -91,6 +99,88 @@ def normalize_for_speech(text: str, language: str = "hi") -> str:
     if language in ("hi", "hinglish"):
         spoken, _ = normalize_for_hindi_tts(spoken)
     return spoken
+
+
+#: Devanagari, because the clips are recorded through the same Cartesia voice
+#: that is pinned to `hi` -- romanised "haan ji" is the script flip that makes
+#: a Hindi voice stumble, and it would stumble here in the one place we cannot
+#: afford it: a 300ms clip with no context to recover in.
+#:
+#: Two clips minimum per group, or the same sound repeats and reads as a loop.
+HINDI_CLIP_GROUPS = {
+    "continue": ["हूँ।", "जी।", "अच्छा।", "हाँ।"],
+    "affirm": ["जी हाँ।", "हाँ जी।", "बिल्कुल।"],
+    "thinking": ["हम्म।", "जी...", "अच्छा..."],
+    "surprise": ["अच्छा?", "ओह।", "अरे।"],
+}
+
+#: Nodes where sounding agreeable is a compliance problem, not a nicety.
+#: Murmuring "हाँ जी" while a customer disputes a charge reads as the agent
+#: conceding the dispute; doing it after they have refused reads as pressure;
+#: doing it to a wrong number is talking to someone who never opted in.
+SILENT_NODES = frozenset({"dispute", "declined", "wrong_number"})
+
+
+#: One per process per language, not one per call. The clip library and its
+#: cache are process-wide state; building a fresh one per call would re-read
+#: (or worse, re-record) 13 clips on every answered phone call.
+_BACKCHANNELS: dict[str, Backchannel] = {}
+
+
+def get_backchannel(language: str) -> Backchannel:
+    """The process-wide backchannel for a language, built on first use."""
+    if language not in _BACKCHANNELS:
+        _BACKCHANNELS[language] = build_backchannel(language)
+    return _BACKCHANNELS[language]
+
+
+async def prewarm_backchannel(language: str) -> bool:
+    """Record the clips before anyone is on the line.
+
+    Recording takes a few seconds against Cartesia, and it happens inside
+    pipeline startup -- so without this the *first* customer of a fresh deploy
+    hears silence while their own backchannel is being synthesised. Cached on
+    disk afterwards, so this is a no-op from the second call on.
+
+    Never fatal: a bot that cannot murmur is still a bot that can collect money.
+    """
+    try:
+        _, _, tts = build_services(language)
+        return await get_backchannel(language).prewarm(tts=tts)
+    except Exception:  # noqa: BLE001 - listening sounds are not worth a call
+        logger.warning("could not prewarm backchannel clips", exc_info=True)
+        return False
+
+
+def build_backchannel(language: str) -> Backchannel:
+    """The listening sounds, in the bot's own voice.
+
+    Worth the cost on this call specifically: an Indian billing conversation is
+    carried by continuous acknowledgement, and silence while someone explains a
+    failed payment reads as a dead line -- they repeat themselves, or hang up.
+
+    It takes no turn and never enters the LLM context, so it cannot corrupt
+    graph traversal or the transcript we file as evidence. What it does cost is
+    a second VAD and turn analyzer running while the customer speaks.
+
+    The cache is keyed by language so switching does not replay Hindi clips at
+    an English speaker; delete `.clip_cache` after changing the voice.
+    """
+    hindi = language in ("hi", "hinglish")
+    return Backchannel(
+        clip_groups=HINDI_CLIP_GROUPS if hindi else None,
+        cache=FileClipCache(f".clip_cache/{language}"),
+        params=BackchannelParams(
+            # A dunning call is not a chat. Firing on every eligible pause
+            # sounds eager, and eager is the wrong register when asking someone
+            # for money they have already failed to pay.
+            fire_probability=0.5,
+            cooldown_s=3.5,
+        ),
+        # Below the default: a backchannel belongs underneath the person who
+        # still has the floor, and on a phone leg it competes with their voice.
+        volume=0.5,
+    )
 
 
 class SpokenFormFilter(BaseTextFilter):
@@ -201,11 +291,21 @@ def build_services(language: str) -> tuple:
         settings=SarvamSTTService.Settings(
             model=resolve_sarvam_model(settings.sarvam_stt_model),
             language=settings.sarvam_language,
-            # Server VAD emits END_SPEECH the moment the speaker stops. Without
-            # it the framework falls back to a silence heuristic, which is what
-            # drove Blostem's STT p95 to 1.3s.
-            vad_signals=True,
-            high_vad_sensitivity=True,
+            # Deliberately OFF, which is the opposite of the LiveKit path.
+            #
+            # Sarvam's server VAD is good, but on Pipecat 1.7.0 nothing wires
+            # its speech events into the user aggregator -- the service does not
+            # override `service_metadata_frame`, so it never requests
+            # `ExternalUserTurnStrategies` (that landed after this release).
+            # Turning it on therefore does not hand Sarvam the turn; it just
+            # adds a second, unheard opinion.
+            #
+            # Worse, `vad_signals=True` suppresses `flush_signal`, so when our
+            # turn detector decides the customer has finished, nothing tells
+            # Sarvam to finalise -- the turn then waits on the p99 fallback
+            # timer instead of the transcript that was ready. Off, the flush
+            # fires on our VAD's stop and the transcript lands immediately.
+            vad_signals=False,
         ),
         mode="transcribe",
     )
@@ -241,10 +341,54 @@ def build_vad() -> SileroVADAnalyzer:
     return SileroVADAnalyzer(
         params=VADParams(
             confidence=settings.vad_activation_threshold,
-            stop_secs=settings.vad_min_silence_duration,
+            # NOT settings.vad_min_silence_duration (0.3), which is a 0.0.108
+            # value and means something else there. In 1.x `stop_secs` is a
+            # low-level detection threshold, not the wait before replying --
+            # that lives in the stop strategy. Pipecat documents 0.2 and
+            # calibrates every STT p99 against it; raising it collapses the
+            # STT wait window and delays turns. The LiveKit path keeps 0.3,
+            # where the parameter still has its old meaning.
+            stop_secs=0.2,
             start_secs=0.4,
             min_volume=0.6,
         )
+    )
+
+
+def build_turn_strategies() -> UserTurnStrategies:
+    """Who decides the customer has finished talking.
+
+    Two decisions, both driven by how this specific call goes wrong.
+
+    Stopping: a customer explaining why they could not pay does not speak in
+    clean sentences -- "मेरे पास... अभी पैसे नहीं हैं" has a gap in the middle
+    that a pure silence timer reads as the end of a turn. Cutting them off
+    there is both rude and expensive: a truncated utterance is what the model
+    labels, so we would file `retry_later` as a refusal. The smart-turn model
+    judges completeness from the audio instead of the clock, and its own
+    `stop_secs` is the backstop for when it stays unsure.
+
+    Starting: `MinWordsUserTurnStartStrategy` replaces the VAD start strategy
+    rather than joining it -- start strategies race, and a VAD start would fire
+    on the first syllable and make the word count irrelevant. It only applies
+    the threshold while the agent is speaking; once the agent is silent a
+    single word starts the turn. That is exactly the behaviour this call needs,
+    because Hindi speakers backchannel constantly ("हाँ", "जी", "अच्छा") and
+    every one of those would otherwise cut the agent off mid-sentence.
+    """
+    return UserTurnStrategies(
+        start=[MinWordsUserTurnStartStrategy(min_words=2, use_interim=True)],
+        stop=[
+            TurnAnalyzerUserTurnStopStrategy(
+                turn_analyzer=LocalSmartTurnAnalyzerV3(
+                    # Generous on purpose: this only applies when the model has
+                    # classified the turn as *incomplete*, i.e. someone is
+                    # visibly still thinking. Rushing them here is the failure
+                    # mode we are buying our way out of.
+                    params=SmartTurnParams(stop_secs=3.0)
+                )
+            )
+        ],
     )
 
 
@@ -263,6 +407,8 @@ class DunningSession:
         self.voice_call_id: int | None = None
         self.started_at = utcnow()
         self._finalised = False
+        #: Set once the pipeline is built; None on the paths that run without one.
+        self.backchannel_gate: BackchannelProcessor | None = None
 
     def tools(self) -> ToolsSchema:
         """One tool, whose enum is regenerated per node.
@@ -304,6 +450,7 @@ class DunningSession:
             return
 
         logger.info("transition %s -> %s", label, self.walker.node.id)
+        self.apply_backchannel_policy()
         # Replacing the system message is the handoff: the model only ever sees
         # the stage it is actually in.
         self.llm_context.set_messages(
@@ -314,6 +461,24 @@ class DunningSession:
 
         if self.walker.finished:
             self.finished.set()
+
+    def apply_backchannel_policy(self) -> None:
+        """Silence the listening sounds where agreement would be misread.
+
+        Called on every transition rather than set once, because a call can
+        reach a sensitive node from several directions -- `disputes_charge`
+        exists on three different nodes.
+        """
+        if self.backchannel_gate is None:
+            return
+        allowed = self.walker.node.id not in SILENT_NODES
+        if self.backchannel_gate.enabled != allowed:
+            logger.info(
+                "backchannel %s at node '%s'",
+                "enabled" if allowed else "silenced",
+                self.walker.node.id,
+            )
+        self.backchannel_gate.enabled = allowed
 
     def _last_user_said(self) -> str | None:
         for message in reversed(self.llm_context.get_messages()):
@@ -429,7 +594,10 @@ async def run_call(transport, session: DunningSession) -> DunningSession:
 
     aggregators = LLMContextAggregatorPair(
         session.llm_context,
-        user_params=LLMUserAggregatorParams(vad_analyzer=build_vad()),
+        user_params=LLMUserAggregatorParams(
+            vad_analyzer=build_vad(),
+            user_turn_strategies=build_turn_strategies(),
+        ),
     )
 
     # The money tools come from our MCP server, so any MCP-speaking agent gets
@@ -448,17 +616,28 @@ async def run_call(transport, session: DunningSession) -> DunningSession:
 
 async def _run_pipeline(session, transport, stt, llm, tts, aggregators) -> DunningSession:
 
-    pipeline = Pipeline(
-        [
-            transport.input(),
-            stt,
-            aggregators.user(),
-            llm,
-            tts,
-            transport.output(),
-            aggregators.assistant(),
-        ]
+    processors = [
+        transport.input(),
+        stt,
+        aggregators.user(),
+        llm,
+        tts,
+        transport.output(),
+        aggregators.assistant(),
+    ]
+
+    # Backchannel wraps the list and inserts its own processors -- it is not a
+    # service we place ourselves. Keep the returned list; the gate has to be
+    # found inside it.
+    processors = get_backchannel(session.language)(processors)
+    session.backchannel_gate = next(
+        (p for p in processors if isinstance(p, BackchannelProcessor)), None
     )
+    # The opening node is not sensitive, but a call can be resumed or replayed
+    # into one, so the policy is applied from the start rather than assumed.
+    session.apply_backchannel_policy()
+
+    pipeline = Pipeline(processors)
 
     task = PipelineTask(pipeline, params=PipelineParams(enable_metrics=True))
 
@@ -527,6 +706,9 @@ async def bot(runner_args: RunnerArguments) -> None:
         dialled_number=body.get("phone"),
     )
 
+    # Before the transport, so the clips are on disk by the time audio flows.
+    await prewarm_backchannel(session.language)
+
     transport = await create_transport(runner_args, TRANSPORT_PARAMS)
     try:
         await run_call(transport, session)
@@ -536,8 +718,10 @@ async def bot(runner_args: RunnerArguments) -> None:
         await session.finalise()
 
 
-__all__ = ["DunningSession", "SpokenFormFilter", "bot", "build_services", "build_vad",
-           "call_context", "context_from_body", "normalize_for_speech", "run_call"]
+__all__ = ["DunningSession", "SpokenFormFilter", "bot", "build_backchannel",
+           "build_llm", "build_services", "build_turn_strategies", "build_vad",
+           "call_context", "context_from_body", "get_backchannel",
+           "normalize_for_speech", "prewarm_backchannel", "run_call"]
 
 
 if __name__ == "__main__":

@@ -781,6 +781,7 @@ dev = [
 pipecat = [
     { name = "pipecat-ai", extra = ["google", "mcp", "webrtc"] },
     { name = "pipecat-ai-prebuilt" },
+    { name = "pipecat-backchannel" },
     { name = "python-dotenv" },
     { name = "sarvamai" },
 ]
@@ -814,6 +815,7 @@ dev = [
 pipecat = [
     { name = "pipecat-ai", extras = ["silero", "google", "cartesia", "webrtc", "mcp"], specifier = "~=1.7" },
     { name = "pipecat-ai-prebuilt", specifier = ">=1.0.5" },
+    { name = "pipecat-backchannel", specifier = ">=0.3.3" },
     { name = "python-dotenv" },
     { name = "sarvamai", specifier = ">=0.1.28" },
 ]
@@ -2920,6 +2922,18 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/bd/17/3400108d390ef6fce66ae7ffe544541d6121ac6201182c737f3dd6e93a54/pipecat_ai_prebuilt-1.0.5.tar.gz", hash = "sha256:eee9e337fcd629e7d07d8cb0f0497de20a697b55f2b11505bf589397c6165c3d", size = 513198, upload-time = "2026-07-20T13:40:09.012Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d4/5e/159eededb2aa02640839d575853da36787dc0ae935cc19c07941c7e3ebd0/pipecat_ai_prebuilt-1.0.5-py3-none-any.whl", hash = "sha256:28eac25c16b2e8d34480edb15debc46ff425a3d077d78193417fd97f437d0380", size = 514703, upload-time = "2026-07-20T13:40:07.576Z" },
+]
+
+[[package]]
+name = "pipecat-backchannel"
+version = "0.3.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pipecat-ai" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/83/31/97532198382031462e7820b61172f476805c5c639ba4a9fceb354e8739f1/pipecat_backchannel-0.3.3.tar.gz", hash = "sha256:e1bb1160d7ea2027b2a43314b167356b9cbb0bfe6cc27a71f88f0c701994a037", size = 3598527, upload-time = "2026-08-10T10:04:23.213Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/d0/ab1cc899344720c66d4a646d0f9e65a1f1f0f778e53ef6017c0414d25a9d/pipecat_backchannel-0.3.3-py3-none-any.whl", hash = "sha256:1e86b80c94632ce57fedb3ec600a332acdd8f3dc1cad455a91e272f47b3f1adf", size = 36406, upload-time = "2026-08-10T10:04:21.82Z" },
 ]
 
 [[package]]

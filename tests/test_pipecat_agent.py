@@ -14,9 +14,13 @@ would start, sound configured, and never detect a turn.
 
 from app.voice.intents import CallIntent
 from app.voice.pipecat_agent import (
+    HINDI_CLIP_GROUPS,
+    SILENT_NODES,
     TRANSPORT_PARAMS,
     DunningSession,
     SpokenFormFilter,
+    build_services,
+    build_turn_strategies,
     build_vad,
     context_from_body,
     normalize_for_speech,
@@ -95,12 +99,14 @@ def test_vad_is_not_on_the_transport():
 
 
 def test_vad_carries_the_tuned_values():
+    """Blostem's threshold carries over; its silence duration deliberately does
+    not -- see `test_vad_stop_secs_matches_what_pipecat_calibrates_against`."""
     from app.config import get_settings
 
     settings = get_settings()
     params = build_vad().params
     assert params.confidence == settings.vad_activation_threshold
-    assert params.stop_secs == settings.vad_min_silence_duration
+    assert params.stop_secs != settings.vad_min_silence_duration
 
 
 # --- one call, one outcome ----------------------------------------------
@@ -158,6 +164,85 @@ async def test_an_abandoned_call_records_unclear(monkeypatch):
 
     assert calls[0]["result"].intent == CallIntent.UNCLEAR
     assert calls[0]["result"].final_node_id == "greet"
+
+
+# --- turn-taking ---------------------------------------------------------
+
+
+def test_the_customer_is_not_cut_off_by_a_clock():
+    """A silence timer would file a mid-sentence pause as a finished turn."""
+    strategies = build_turn_strategies()
+    stop = strategies.stop[0]
+    assert type(stop).__name__ == "TurnAnalyzerUserTurnStopStrategy"
+
+
+def test_a_backchannel_cannot_interrupt_the_agent():
+    """"हाँ" while the agent speaks must not steal the turn.
+
+    MinWords has to *replace* the VAD start strategy, not join it: start
+    strategies race, so a VAD start would fire on the first syllable and make
+    the word threshold meaningless.
+    """
+    start = build_turn_strategies().start
+    assert [type(s).__name__ for s in start] == ["MinWordsUserTurnStartStrategy"]
+
+
+def test_vad_stop_secs_matches_what_pipecat_calibrates_against():
+    """0.2 is a documented contract, not a taste: STT p99 values assume it."""
+    assert build_vad().params.stop_secs == 0.2
+
+
+def test_sarvam_does_not_second_guess_the_turn():
+    """On 1.7.0 server VAD is never wired to the aggregator; it only mutes the
+    flush that makes our own turn detection fast."""
+    stt, _, _ = build_services("hi")
+    assert stt._settings.vad_signals is False
+
+
+# --- backchannel ---------------------------------------------------------
+
+
+def test_the_clips_are_devanagari():
+    """Romanised clips would flip script inside a 300ms sound."""
+    for group, clips in HINDI_CLIP_GROUPS.items():
+        assert len(clips) >= 2, f"{group} would repeat itself"
+        for clip in clips:
+            assert any("ऀ" <= ch <= "ॿ" for ch in clip), clip
+
+
+class FakeGate:
+    def __init__(self) -> None:
+        self.enabled = True
+
+
+def test_the_agent_stops_murmuring_when_a_charge_is_disputed():
+    """Agreement noises while someone disputes a charge read as conceding it."""
+    session = DunningSession(context_from_body(BODY))
+    session.backchannel_gate = FakeGate()
+
+    session.walker.transition("identity_confirmed")
+    session.apply_backchannel_policy()
+    assert session.backchannel_gate.enabled
+
+    session.walker.transition("disputes_charge")
+    session.apply_backchannel_policy()
+    assert not session.backchannel_gate.enabled
+
+
+def test_every_sensitive_node_is_reachable_and_silenced():
+    """A node named in SILENT_NODES that no longer exists would silently stop
+    protecting anything."""
+    from app.voice.flow import DUNNING_FLOW
+
+    node_ids = {node.id for node in DUNNING_FLOW.nodes}
+    assert SILENT_NODES <= node_ids
+
+
+def test_the_policy_is_a_no_op_without_a_pipeline():
+    """demo_call and the tests build a session with no backchannel at all."""
+    session = DunningSession(context_from_body(BODY))
+    assert session.backchannel_gate is None
+    session.apply_backchannel_policy()  # must not raise
 
 
 def test_the_transcript_is_evidence_not_context():
