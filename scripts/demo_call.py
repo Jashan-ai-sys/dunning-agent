@@ -75,6 +75,12 @@ async def main() -> None:
     parser.add_argument("--case", type=int, help="use a real recovery case id")
     parser.add_argument("--room", default="dunning-demo")
     parser.add_argument("--identity", default="demo-listener")
+    parser.add_argument("--name", help="override the customer name")
+    parser.add_argument("--amount-paise", type=int, help="override the amount, in paise")
+    parser.add_argument("--reason", help="override the failure reason")
+    parser.add_argument(
+        "--language", choices=["hi", "hinglish", "en"], help="override the language"
+    )
     args = parser.parse_args()
 
     settings = get_settings()
@@ -82,6 +88,19 @@ async def main() -> None:
         raise SystemExit("LiveKit is not configured; set LIVEKIT_URL/API_KEY/API_SECRET")
 
     context = await context_from_case(args.case) if args.case else sample_context()
+
+    # Overrides let the demo speak a real case pulled from Razorpay even when the
+    # row itself lives in the production database rather than this one.
+    if args.name:
+        context["customer_name"] = args.name
+    if args.language:
+        context["preferred_language"] = args.language
+    if args.reason:
+        context["failure_reason"] = args.reason
+    if args.amount_paise:
+        context["amount_spoken"] = spoken_amount(
+            args.amount_paise, context.get("preferred_language", "hi")
+        )
     # No "phone" key, so the agent skips the SIP leg entirely and just waits in
     # the room for a browser participant.
     context["company_name"] = settings.company_name

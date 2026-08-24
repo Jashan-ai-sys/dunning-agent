@@ -34,6 +34,15 @@ class CallResult:
     #: Labelled graph turns, from GraphWalker.observations_as_dicts().
     transitions: list[dict] | None = None
 
+    @property
+    def intent_sends_link(self) -> bool:
+        """Whether this outcome should create a payment link.
+
+        Lets the caller skip building a Razorpay client for a call that ended in
+        "declined" and will never touch the API.
+        """
+        return outcome_for(self.intent).send_payment_link
+
 
 async def apply_call_result(
     session: AsyncSession,

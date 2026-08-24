@@ -22,7 +22,16 @@ from livekit.agents import Agent, AgentServer, AgentSession, RunContext, functio
 from livekit.plugins import cartesia, google, openai, sarvam, silero
 
 from app.config import get_settings
+from app.constants import CallStatus
+from app.store import utcnow
 from app.voice.flow import DUNNING_FLOW, language_hint
+from app.voice.intents import CallIntent
+from app.voice.outcomes import CallResult
+from app.voice.persistence import (
+    duration_since,
+    finalise_call,
+    open_call_record,
+)
 from app.voice.spoken import spoken_amount
 from app.voice.walker import GraphWalker, InvalidTransition
 from app.voice.warmup import await_warmup, warm_sarvam
@@ -53,6 +62,10 @@ class CallState:
     def __init__(self, walker: GraphWalker) -> None:
         self.walker = walker
         self.transcript: list[str] = []
+        self.recovery_case_id: int | None = None
+        self.voice_call_id: int | None = None
+        self.started_at = utcnow()
+        self.finalised = False
 
     @property
     def intent(self):
@@ -79,15 +92,61 @@ class NodeAgent(Agent):
 
     async def on_enter(self) -> None:
         await self.session.generate_reply()
-        if self._state.walker.finished:
-            logger.info(
-                "call finished at %s with intent %s",
-                self._state.final_node_id,
-                self._state.intent,
-            )
-            # Let the closing line play out before tearing the room down.
-            await self.session.drain()
-            await self.session.aclose()
+        if not self._state.walker.finished:
+            return
+
+        logger.info(
+            "call finished at %s with intent %s",
+            self._state.final_node_id,
+            self._state.intent,
+        )
+        # Persist before tearing down. The closing line is still playing, so
+        # this costs the customer nothing, and a room that dies mid-write would
+        # otherwise lose the outcome.
+        await self._persist_outcome()
+        await self.session.drain()
+        await self.session.aclose()
+
+    async def _persist_outcome(self) -> None:
+        """Apply the detected intent to the case, exactly once."""
+        state = self._state
+        if state.finalised:
+            return
+        state.finalised = True
+
+        intent = state.intent or CallIntent.UNCLEAR
+        await finalise_call(
+            voice_call_id=state.voice_call_id,
+            recovery_case_id=state.recovery_case_id,
+            result=CallResult(
+                intent=intent,
+                status=CallStatus.COMPLETED,
+                final_node_id=state.final_node_id,
+                transcript=self._read_transcript(),
+                duration_seconds=await duration_since(state.started_at),
+                answered_at=state.started_at,
+                transitions=state.walker.observations_as_dicts(),
+            ),
+        )
+
+    def _read_transcript(self) -> str | None:
+        """Flatten the session history. Evidence only -- never read back in."""
+        try:
+            lines = []
+            for item in getattr(self.session.history, "items", None) or []:
+                role = getattr(item, "role", None)
+                if role not in ("user", "assistant"):
+                    continue
+                content = getattr(item, "content", None)
+                if isinstance(content, list):
+                    content = " ".join(str(c) for c in content)
+                text = str(content).strip()
+                if text:
+                    lines.append(f"{role}: {text}")
+            return "\n".join(lines) or None
+        except Exception:  # noqa: BLE001 - a transcript is never worth a call
+            logger.debug("could not read the transcript", exc_info=True)
+            return None
 
     @staticmethod
     def _last_user_utterance(context: RunContext) -> str | None:
@@ -218,6 +277,13 @@ async def dunning_session(ctx: agents.JobContext) -> None:
     # Raises before the phone rings if the context is incomplete, rather than
     # reading a literal "{customer_name}" down the line.
     state = CallState(GraphWalker(DUNNING_FLOW, call_context))
+
+    state.recovery_case_id = metadata.get("recovery_case_id")
+    state.voice_call_id = await open_call_record(
+        recovery_case_id=state.recovery_case_id,
+        room_name=ctx.room.name,
+        dialled_number=metadata.get("phone"),
+    )
 
     session = build_session()
     # Latest useful moment: the pipeline is built, nobody has spoken yet.
