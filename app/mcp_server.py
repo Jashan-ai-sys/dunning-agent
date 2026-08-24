@@ -20,6 +20,7 @@ case. Recovery is something only a real Razorpay webhook may assert.
 
 import logging
 
+from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from sqlalchemy import select
 
@@ -29,6 +30,10 @@ from app.models import Customer, RecoveryCase
 from app.voice.persistence import send_payment_link_now
 
 logger = logging.getLogger(__name__)
+
+# Loaded here rather than passed through the client config: DATABASE_URL and
+# the Razorpay keys must never end up in a committed .mcp.json.
+load_dotenv()
 
 mcp = FastMCP("dunning-recovery")
 
