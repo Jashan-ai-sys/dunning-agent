@@ -111,6 +111,80 @@ class SpokenFormFilter(BaseTextFilter):
         return normalize_for_speech(text, self._language)
 
 
+def resolve_sarvam_model(configured: str) -> str:
+    """Pin to what the installed Pipecat actually accepts.
+
+    `saaras:v4` is current at Sarvam and is what the LiveKit plugin runs, but
+    Pipecat 1.7.0 validates against its own table and rejects it outright. Down-
+    grading the shared setting would drag the working LiveKit path back a
+    version for no reason, so the fallback lives here.
+
+    The fallback is not "any supported model": it must still support `mode`,
+    `language` and VAD params, or the transcribe mode and Hindi pin we depend on
+    are silently dropped. Once Pipecat adds v4 the setting passes through and
+    this does nothing.
+    """
+    from pipecat.services.sarvam.stt import MODEL_CONFIGS
+
+    if configured in MODEL_CONFIGS:
+        return configured
+
+    usable = [
+        name
+        for name, config in MODEL_CONFIGS.items()
+        if config.supports_mode and config.supports_language and config.supports_vad_params
+    ]
+    if not usable:
+        raise RuntimeError(
+            f"pipecat rejects '{configured}' and offers no model supporting "
+            f"mode + language + VAD. Available: {sorted(MODEL_CONFIGS)}"
+        )
+
+    fallback = sorted(usable)[-1]
+    logger.warning(
+        "pipecat does not support Sarvam '%s'; using '%s' on this path "
+        "(the LiveKit path is unaffected)",
+        configured,
+        fallback,
+    )
+    return fallback
+
+
+def build_llm():
+    """Gemini via Vertex AI by default, matching the LiveKit path.
+
+    Vertex authenticates with a service account rather than an API key, which
+    keeps the LLM inside the same GCP project and IAM boundary as everything
+    else. Pipecat splits these across two classes where LiveKit used one flag,
+    so the choice is explicit here.
+    """
+    settings = get_settings()
+
+    if not settings.google_use_vertex:
+        return GoogleLLMService(
+            api_key=os.environ["GOOGLE_API_KEY"],
+            settings=GoogleLLMService.Settings(
+                model=settings.gemini_model, temperature=settings.llm_temperature
+            ),
+        )
+
+    from pipecat.services.google.vertex.llm import GoogleVertexLLMService
+
+    if not settings.google_cloud_project:
+        raise RuntimeError("GOOGLE_CLOUD_PROJECT is required for the Vertex path")
+
+    return GoogleVertexLLMService(
+        # Left to None so google-genai falls back to ADC, which is what
+        # GOOGLE_APPLICATION_CREDENTIALS already sets up for the rest of the app.
+        credentials_path=os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"),
+        project_id=settings.google_cloud_project,
+        location=settings.google_cloud_location,
+        settings=GoogleVertexLLMService.Settings(
+            model=settings.gemini_model, temperature=settings.llm_temperature
+        ),
+    )
+
+
 def build_services(language: str) -> tuple:
     """STT, LLM and TTS, configured exactly as the LiveKit path is."""
     settings = get_settings()
@@ -125,7 +199,7 @@ def build_services(language: str) -> tuple:
         keepalive_timeout=30.0,
         keepalive_interval=5.0,
         settings=SarvamSTTService.Settings(
-            model=settings.sarvam_stt_model,
+            model=resolve_sarvam_model(settings.sarvam_stt_model),
             language=settings.sarvam_language,
             # Server VAD emits END_SPEECH the moment the speaker stops. Without
             # it the framework falls back to a silence heuristic, which is what
@@ -136,17 +210,16 @@ def build_services(language: str) -> tuple:
         mode="transcribe",
     )
 
-    llm = GoogleLLMService(
-        model=settings.gemini_model,
-        params=GoogleLLMService.InputParams(temperature=settings.llm_temperature),
-    )
+    llm = build_llm()
 
     tts = CartesiaTTSService(
         api_key=os.environ["CARTESIA_API_KEY"],
-        voice_id=settings.cartesia_voice,
-        # Cartesia pronounces digits according to the configured language, so
-        # this has to match what the normalizers produce.
-        params=CartesiaTTSService.InputParams(language="hi" if language != "en" else "en"),
+        settings=CartesiaTTSService.Settings(
+            voice=settings.cartesia_voice,
+            # Cartesia pronounces digits according to the configured language,
+            # so this has to match what the normalizers produce.
+            language="hi" if language != "en" else "en",
+        ),
         text_filters=[SpokenFormFilter(language)],
     )
     return stt, llm, tts
