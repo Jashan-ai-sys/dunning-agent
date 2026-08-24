@@ -473,10 +473,16 @@ class DunningSession:
         # message. Rewriting changed the prefix on every stage change, so every
         # turn after a transition was a guaranteed cache miss; this only ever
         # appends, so the prefix the model has already seen stays byte-identical.
+        # Framed as a directive, not a data blob. A tool result carries far less
+        # weight with the model than a system instruction, and the first version
+        # of this returned {"moved_to", "instructions"} -- which the model read
+        # as information and then went back to whatever the system prompt last
+        # told it to do, re-greeting the customer on every turn.
         await params.result_callback(
             {
-                "moved_to": self.walker.node.id,
-                "instructions": self.walker.stage_instructions(),
+                "previous_stage": "finished -- do not repeat it",
+                "now_at_stage": self.walker.node.id,
+                "do_this_now": self.walker.stage_instructions(),
             }
         )
 

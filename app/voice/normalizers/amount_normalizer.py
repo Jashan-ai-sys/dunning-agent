@@ -42,6 +42,10 @@ import re
 _UNITS_HI = {"crore": "करोड़", "lakh": "लाख", "thousand": "हज़ार"}
 _UNITS_EN = {"crore": "crore", "lakh": "lakh", "thousand": "thousand"}
 
+#: Spoken currency word, used when an amount will not collapse to a magnitude.
+_RUPEES_HI = "रुपये"
+_RUPEES_EN = "rupees"
+
 _CRORE = 10_000_000
 _LAKH = 100_000
 _THOUSAND = 1_000
@@ -53,6 +57,10 @@ def _fmt_num(value: float) -> str:
     if value == int(value):
         return str(int(value))
     return f"{value:.1f}".rstrip("0").rstrip(".")
+
+
+def _rupees_word(lang: str) -> str:
+    return _RUPEES_HI if lang.lower().startswith("hi") else _RUPEES_EN
 
 
 def _inr_to_words(amount: int, lang: str) -> str | None:
@@ -138,7 +146,17 @@ def normalize_amounts_for_tts(
             return m.group(0)
         words = _inr_to_words(amount, lang)
         if words is None:
-            return m.group(0)  # not clean — leave the whole ₹NNN token as-is
+            # Not a clean magnitude, but the ``₹`` still has to go: a currency
+            # glyph is not a word, and a Hindi voice either skips it or reads it
+            # in English. Fall back to the same convention ``spoken.py`` uses --
+            # ASCII numeral plus the unit word -- so "₹2499" is said as
+            # "2499 रुपये" rather than left for the voice to guess at.
+            #
+            # This is the common case for us, not the edge case: our amounts
+            # come out of a subscriptions table and are rarely round lakhs.
+            spoken = f"{amount} {_rupees_word(lang)}"
+            replacements.append((m.group(0), spoken))
+            return spoken
         replacements.append((m.group(0), words))
         return words
 

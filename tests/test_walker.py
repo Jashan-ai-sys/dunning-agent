@@ -154,7 +154,10 @@ def test_terminal_instructions_close_the_call():
     w = walker()
     w.transition("not_the_customer")
     assert "end of the call" in w.instructions()
-    assert "transition" not in w.instructions()
+    # Asserted on the stage, not the whole prompt: the preamble now explains the
+    # transition tool in general terms, but a finished call must not be offered
+    # a move out of its terminal node.
+    assert "transition" not in w.stage_instructions()
 
 
 def test_transition_speech_is_rendered_when_present():
