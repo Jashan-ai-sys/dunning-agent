@@ -153,9 +153,12 @@ ASK_INTENT = Node(
     prompt=(
         SYSTEM_STYLE
         + "\n\nOffer exactly three options and let them choose: pay now via a link "
-        "you send on WhatsApp or SMS, pay later at a time they pick, or stop the "
+        "you send on SMS, pay later at a time they pick, or stop the "
         "subscription. Do not push. Do not offer a discount -- you have no "
-        "authority to change the amount."
+        "authority to change the amount.\n\n"
+        "If they agree to pay now, call the `send_payment_link` tool FIRST and "
+        "wait for its result. Only say the link has been sent once that tool "
+        "confirms it. Never promise a link you have not actually sent."
     ),
     extracts=("preferred_time",),
     edges=(

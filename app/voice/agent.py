@@ -31,6 +31,7 @@ from app.voice.persistence import (
     duration_since,
     finalise_call,
     open_call_record,
+    send_payment_link_now,
 )
 from app.voice.spoken import spoken_amount
 from app.voice.walker import GraphWalker, InvalidTransition
@@ -167,6 +168,28 @@ class NodeAgent(Agent):
         except Exception:  # noqa: BLE001 - diagnostics must never break a call
             logger.debug("could not read the last user utterance", exc_info=True)
         return None
+
+    @function_tool
+    async def send_payment_link(self, context: RunContext) -> str:
+        """Send the customer their Razorpay payment link by SMS and email.
+
+        Call this the moment the customer agrees to pay. Do not claim you have
+        sent a link until this returns successfully -- if it fails, apologise
+        and say a colleague will follow up.
+        """
+        result = await send_payment_link_now(self._state.recovery_case_id)
+        if result.get("sent"):
+            logger.info("payment link sent for case %s", self._state.recovery_case_id)
+            return (
+                "Link sent by SMS and email. Tell the customer it is on its way; "
+                "do not read the URL out, it is long and error-prone by voice."
+            )
+        reason = result.get("reason", "unknown")
+        logger.warning("payment link not sent: %s", reason)
+        return (
+            f"The link could NOT be sent ({reason}). Do not tell the customer it "
+            "was sent. Apologise briefly and say a colleague will follow up."
+        )
 
     @function_tool
     async def transition(self, context: RunContext, label: str) -> str:

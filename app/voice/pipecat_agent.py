@@ -21,8 +21,10 @@ against the current API where they earn their place.
 import asyncio
 import logging
 import os
+import sys
 
 from dotenv import load_dotenv
+from mcp import StdioServerParameters
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.vad.silero import SileroVADAnalyzer
@@ -35,6 +37,7 @@ from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.services.cartesia.tts import CartesiaTTSService
 from pipecat.services.google.llm import GoogleLLMService
+from pipecat.services.mcp_service import MCPClient
 from pipecat.services.sarvam.stt import SarvamSTTService
 
 from app.config import get_settings
@@ -132,6 +135,7 @@ class DunningSession:
             [{"role": "system", "content": self.walker.instructions()}]
         )
         self.finished = asyncio.Event()
+        self.recovery_case_id: int | None = context.get("_recovery_case_id")
 
     def tools(self) -> ToolsSchema:
         """One tool, whose enum is regenerated per node.
@@ -205,15 +209,50 @@ def call_context(*, customer_name: str, amount_paise: int, failure_reason: str,
     return context
 
 
+def recovery_mcp() -> MCPClient:
+    """Our own MCP server, over stdio.
+
+    Runs as a child process of the agent, so it shares the environment -- the
+    same DATABASE_URL and Razorpay keys -- without those ever crossing a
+    network. `tools_filter` is explicit: the LLM gets exactly these two and
+    nothing a future tool might add by accident.
+    """
+    return MCPClient(
+        server_params=StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "app.mcp_server"],
+            env=dict(os.environ),
+        ),
+        tools_filter=["send_payment_link", "get_case"],
+    )
+
+
 async def run_call(transport, context: dict) -> DunningSession:
     """Wire and run one conversation. Returns the session for its outcome."""
     session = DunningSession(context)
     stt, llm, tts = build_services(session.language)
 
+    # `transition` stays in-process: it is graph traversal, not an external
+    # capability, and it must not be able to fail over a transport.
     llm.register_function("transition", session.on_transition)
 
     aggregators = LLMContextAggregatorPair(session.llm_context)
-    session.llm_context.set_tools(session.tools())
+
+    # The money tools come from our MCP server, so any MCP-speaking agent gets
+    # the same guarantees rather than a second implementation of them.
+    async with recovery_mcp() as mcp:
+        mcp_tools = await mcp.register_tools(llm)
+        session.llm_context.set_tools(
+            ToolsSchema(
+                standard_tools=(
+                    session.tools().standard_tools + mcp_tools.standard_tools
+                )
+            )
+        )
+        return await _run_pipeline(session, transport, stt, llm, tts, aggregators)
+
+
+async def _run_pipeline(session, transport, stt, llm, tts, aggregators) -> DunningSession:
 
     pipeline = Pipeline(
         [

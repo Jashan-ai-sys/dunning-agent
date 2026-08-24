@@ -20,6 +20,7 @@ from sqlalchemy import select
 
 from app.db import SessionLocal
 from app.models import Customer, RecoveryCase, VoiceCall
+from app.payment_links import create_recovery_link
 from app.razorpay.client import RazorpayClient
 from app.store import utcnow
 from app.voice.outcomes import CallResult, apply_call_result
@@ -125,6 +126,54 @@ async def finalise_call(
             )
     except Exception:  # noqa: BLE001 - never break the call
         logger.exception("could not persist the call outcome")
+
+
+async def send_payment_link_now(recovery_case_id: int | None) -> dict:
+    """Create and record the Razorpay link for a case, mid-call.
+
+    Returns a dict the model can read back: ``{"sent": True, "url": ...}`` or
+    ``{"sent": False, "reason": ...}``. Never raises -- a failed link is a thing
+    the agent should apologise for, not a dropped call.
+
+    Razorpay is told to notify by SMS and email, so the customer receives it
+    while still on the line. ``create_recovery_link`` is idempotent: asking
+    twice returns the existing link rather than minting a second one for the
+    same debt.
+    """
+    if not recovery_case_id:
+        # A demo run. Say so rather than inventing a URL the model would read
+        # aloud to somebody.
+        return {"sent": False, "reason": "no case attached to this call"}
+
+    try:
+        async with SessionLocal() as session:
+            case = await session.get(RecoveryCase, int(recovery_case_id))
+            if case is None:
+                return {"sent": False, "reason": "case not found"}
+
+            customer = None
+            if case.razorpay_customer_id:
+                customer = (
+                    await session.execute(
+                        select(Customer).where(
+                            Customer.razorpay_customer_id == case.razorpay_customer_id
+                        )
+                    )
+                ).scalar_one_or_none()
+            if customer is None:
+                customer = Customer(
+                    razorpay_customer_id=case.razorpay_customer_id or "unknown"
+                )
+
+            link = await create_recovery_link(session, case, customer, RazorpayClient())
+            await session.commit()
+            if link is None:
+                return {"sent": False, "reason": "could not create a link"}
+            logger.info("sent payment link %s for case %s", link.id, case.id)
+            return {"sent": True, "url": link.short_url, "amount_paise": case.original_amount}
+    except Exception as exc:  # noqa: BLE001 - never break the call
+        logger.exception("could not send a payment link")
+        return {"sent": False, "reason": str(exc)[:120]}
 
 
 async def duration_since(started_at) -> int | None:
