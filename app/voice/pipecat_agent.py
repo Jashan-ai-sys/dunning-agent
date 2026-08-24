@@ -561,7 +561,8 @@ class DunningSession:
 
 
 def call_context(*, customer_name: str, amount_paise: int, failure_reason: str,
-                 language: str, company: str, subscription_halted: bool = False) -> dict:
+                 language: str, company: str, subscription_halted: bool = False,
+                 route: str | None = None) -> dict:
     context = {
         "company_name": company,
         "customer_name": customer_name,
@@ -569,6 +570,7 @@ def call_context(*, customer_name: str, amount_paise: int, failure_reason: str,
         "failure_reason": failure_reason,
         "language_hint": language_hint(language),
         "halt_note": halt_note(subscription_halted),
+        "suggested_route": route,
     }
     context["_language"] = language
     return context
@@ -591,6 +593,7 @@ def context_from_body(body: dict) -> dict:
         language=language,
         company=body.get("company_name", settings.company_name),
         subscription_halted=bool(body.get("subscription_halted")),
+        route=body.get("suggested_route"),
     )
     # Pre-rendered amounts win over our own: the dispatcher may have spoken
     # forms we cannot reconstruct from paise alone.

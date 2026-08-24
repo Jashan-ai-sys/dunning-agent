@@ -21,6 +21,7 @@ CONTEXT = {
     "failure_reason": "insufficient funds",
     "language_hint": "in Hinglish",
     "halt_note": "The subscription is still active.",
+    "suggested_route": "Offer the payment link.",
 }
 
 

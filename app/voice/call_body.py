@@ -19,6 +19,7 @@ from app.config import get_settings
 from app.db import SessionLocal
 from app.models import Customer, RecoveryCase
 from app.voice.reasons import spoken_reason
+from app.voice.routes import suggested_route
 from app.voice.spoken import spoken_amount
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,12 @@ def call_body(case: RecoveryCase, customer: Customer, *, company_name: str) -> d
         # at risk rather than just this charge. The agent needs to know: the
         # right thing to say changes, and so does the urgency.
         "subscription_halted": case.halted_at is not None,
+        # Decided by rule, not by the model: the remedy for a given failure code
+        # is the same every time, and it is the one thing the agent tells the
+        # customer to actually do.
+        "suggested_route": suggested_route(
+            case.failure_reason, halted=case.halted_at is not None
+        ),
     }
 
 

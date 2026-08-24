@@ -33,6 +33,7 @@ from app.voice.persistence import (
     open_call_record,
     send_payment_link_now,
 )
+from app.voice.routes import suggested_route
 from app.voice.spoken import spoken_amount
 from app.voice.walker import GraphWalker, InvalidTransition
 from app.voice.warmup import await_warmup, warm_sarvam
@@ -297,6 +298,7 @@ async def dunning_session(ctx: agents.JobContext) -> None:
         "failure_reason": metadata.get("failure_reason", "the bank declined it"),
         "language_hint": language_hint(metadata.get("preferred_language")),
         "halt_note": halt_note(metadata.get("subscription_halted")),
+        "suggested_route": metadata.get("suggested_route") or suggested_route(None),
     }
     # Raises before the phone rings if the context is incomplete, rather than
     # reading a literal "{customer_name}" down the line.
