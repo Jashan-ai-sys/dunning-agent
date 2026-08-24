@@ -1,5 +1,10 @@
 {
   "mcpServers": {
+    "pipecat-context-hub": {
+      "command": "C:\\Users\\WIN11\\AppData\\Roaming\\uv\\tools\\pipecat-ai-context-hub\\Scripts\\python.exe",
+      "args": ["-m", "pipecat_context_hub", "serve"],
+      "env": {}
+    },
     "dunning": {
       "command": ".venv/Scripts/python.exe",
       "args": ["-m", "app.mcp_server"],
