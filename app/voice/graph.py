@@ -87,6 +87,19 @@ class ConversationGraph:
         return next(n for n in self.nodes if n.kind is NodeKind.START)
 
     @property
+    def labels(self) -> tuple[str, ...]:
+        """Every edge label in the flow, sorted and de-duplicated.
+
+        Declared to the model once per call as the tool's enum, rather than
+        regenerated per node. Two reasons: a tool schema that changes mid-call
+        changes the request prefix and costs the provider's cache, and a schema
+        that disagrees with the node's own instructions is worse than one that
+        is merely broad. Which labels are legal *here* stays with the walker,
+        which rejects the rest.
+        """
+        return tuple(sorted({edge.label for node in self.nodes for edge in node.edges}))
+
+    @property
     def variables(self) -> set[str]:
         """Every template variable the flow needs to be rendered."""
         found: set[str] = template_variables(self.preamble)

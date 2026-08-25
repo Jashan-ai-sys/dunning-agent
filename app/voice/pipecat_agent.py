@@ -428,11 +428,31 @@ class DunningSession:
         self.backchannel_gate: BackchannelProcessor | None = None
 
     def tools(self) -> ToolsSchema:
-        """One tool, whose enum is regenerated per node.
+        """One tool, declared once, listing every label in the flow.
 
-        The model picks a label, never a destination -- an unknown label, or one
-        valid elsewhere but not here, is refused.
+        Deliberately not regenerated per node, for two reasons that point the
+        same way.
+
+        The tool schema is sent on every request alongside the system
+        instruction, at the front of what a provider hashes for its prefix
+        cache. A schema that changes at each stage changes that prefix, so it
+        would cost a cache hit on the turn after every transition -- the exact
+        turns where the context is longest.
+
+        It was also simply wrong. `set_tools` is called once at startup, so the
+        per-node version froze at the greet node's labels and then disagreed
+        with the instructions at every later stage: the schema offered
+        `identity_confirmed` while the node was asking for `acknowledged`. It
+        only worked because Gemini treats an enum as guidance.
+
+        Which labels are legal *right now* is not the schema's job. The node
+        instructions name them, and `GraphWalker.transition` refuses anything
+        else -- so a wrong label costs a rejected tool call, not a wrong branch.
         """
+        graph = self.walker.graph
+        conditions = {
+            edge.label: edge.condition for node in graph.nodes for edge in node.edges
+        }
         return ToolsSchema(
             standard_tools=[
                 FunctionSchema(
@@ -440,14 +460,16 @@ class DunningSession:
                     description=(
                         "Move the conversation to the next stage. Call this only when "
                         "the customer's position is clear; if it is still ambiguous, "
-                        "ask one short clarifying question instead."
+                        "ask one short clarifying question instead. Only the labels "
+                        "listed in your current stage instructions are accepted; any "
+                        "other label is rejected and you will be asked again."
                     ),
                     properties={
                         "label": {
                             "type": "string",
-                            "enum": [e.label for e in self.walker.options],
+                            "enum": list(graph.labels),
                             "description": "\n".join(
-                                f"{e.label}: {e.condition}" for e in self.walker.options
+                                f"{label}: {conditions[label]}" for label in graph.labels
                             ),
                         }
                     },

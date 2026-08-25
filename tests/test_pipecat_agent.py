@@ -12,6 +12,8 @@ would start, sound configured, and never detect a turn.
 """
 
 
+import pytest
+
 from app.voice.intents import CallIntent
 from app.voice.pipecat_agent import (
     HINDI_CLIP_GROUPS,
@@ -112,17 +114,46 @@ def test_vad_carries_the_tuned_values():
 # --- one call, one outcome ----------------------------------------------
 
 
-async def test_the_tool_enum_is_rebuilt_per_node():
-    """The model picks a label valid *here*, never a destination."""
-    session = DunningSession(context_from_body(BODY))
-    assert [
-        p for p in session.tools().standard_tools[0].properties["label"]["enum"]
-    ] == ["identity_confirmed", "not_the_customer"]
+def _enum(session) -> list[str]:
+    return session.tools().standard_tools[0].properties["label"]["enum"]
 
-    session.walker.transition("identity_confirmed")
-    labels = session.tools().standard_tools[0].properties["label"]["enum"]
-    assert "identity_confirmed" not in labels
-    assert "acknowledged" in labels
+
+def test_the_tool_schema_does_not_change_mid_call():
+    """It is sent with every request, at the front of what a provider hashes
+    for its prefix cache. A schema that changed per stage would cost a hit on
+    the turn after every transition -- the turns with the most context to save.
+    """
+    session = DunningSession(context_from_body(BODY))
+    before = _enum(session)
+
+    for label in ["identity_confirmed", "acknowledged", "reason_given"]:
+        session.walker.transition(label)
+        assert _enum(session) == before
+
+
+def test_the_enum_covers_every_label_in_the_flow():
+    """The old per-node version froze at greet's labels, because set_tools runs
+    once -- so the schema offered `identity_confirmed` while the node was asking
+    for `acknowledged`. It only worked because Gemini treats an enum as advice.
+    """
+    session = DunningSession(context_from_body(BODY))
+    from app.voice.flow import DUNNING_FLOW
+
+    assert set(_enum(session)) == {
+        edge.label for node in DUNNING_FLOW.nodes for edge in node.edges
+    }
+
+
+def test_a_label_valid_elsewhere_is_still_refused_here():
+    """The safety the narrow enum used to provide now lives where it belongs:
+    a broad schema costs a rejected tool call, never a wrong branch."""
+    from app.voice.walker import InvalidTransition
+
+    session = DunningSession(context_from_body(BODY))
+    assert "pay_now" in _enum(session)  # advertised...
+
+    with pytest.raises(InvalidTransition):
+        session.walker.transition("pay_now")  # ...but not from `greet`
 
 
 async def test_finalising_twice_writes_once(monkeypatch):
