@@ -604,6 +604,38 @@ def call_context(*, customer_name: str, amount_paise: int, failure_reason: str,
     return context
 
 
+def _truthy(value) -> bool:
+    """Read a flag that may have crossed a wire as a string.
+
+    LiveKit carries JSON and hands back a real bool; Twilio delivers every
+    custom parameter as a string, where a bare ``bool()`` turns ``"false"`` into
+    True. Getting this wrong tells the agent a subscription is halted when it is
+    not, which changes what it says on a live money call.
+    """
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "0", "false", "no"}
+    return bool(value)
+
+
+def _case_id(value) -> int | None:
+    """The case id, as an int, however it arrived.
+
+    Twilio delivers custom parameters as strings, so this crosses the wire as
+    "7". Left as a string it reaches `open_call_record` and
+    `send_payment_link_now` as a database parameter for an integer column, where
+    asyncpg rejects it -- and `persistence.py` swallows its own failures on
+    purpose, so nothing would be raised. The call would sound perfect and
+    quietly never send the payment link.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        logger.warning("ignoring unusable recovery_case_id %r", value)
+        return None
+
+
 def context_from_body(body: dict) -> dict:
     """Build the call context from the runner's request body.
 
@@ -620,31 +652,49 @@ def context_from_body(body: dict) -> dict:
         failure_reason=body.get("failure_reason") or spoken_reason(None, language),
         language=language,
         company=body.get("company_name", settings.company_name),
-        subscription_halted=bool(body.get("subscription_halted")),
+        subscription_halted=_truthy(body.get("subscription_halted")),
         route=body.get("suggested_route"),
     )
     # Pre-rendered amounts win over our own: the dispatcher may have spoken
     # forms we cannot reconstruct from paise alone.
     if body.get("amount_spoken"):
         context["amount_spoken"] = body["amount_spoken"]
-    context["_recovery_case_id"] = body.get("recovery_case_id")
+    context["_recovery_case_id"] = _case_id(body.get("recovery_case_id"))
     context["_phone"] = body.get("phone")
     return context
 
 
-def recovery_mcp() -> MCPClient:
-    """Our own MCP server, over stdio.
+def recovery_mcp(recovery_case_id: int | None) -> MCPClient:
+    """Our own MCP server, over stdio, bound to one case.
 
     Runs as a child process of the agent, so it shares the environment -- the
     same DATABASE_URL and Razorpay keys -- without those ever crossing a
     network. `tools_filter` is explicit: the LLM gets exactly these two and
     nothing a future tool might add by accident.
+
+    The case travels in that environment rather than as a tool argument. When
+    it was an argument the model had to supply an integer nobody had told it,
+    and it invented one -- `send_payment_link(recovery_case_id=12345)` against
+    a case numbered 1. A wrong guess that happened to land on a real case would
+    have sent someone else's payment link to whoever was on this call.
+
+    Pipecat 1.7.0 has no `tools_arguments` to bind it client-side (that landed
+    later), and the environment is the seam we already own: one server process
+    per call, spawned by us.
     """
+    env = dict(os.environ)
+    if recovery_case_id is not None:
+        env["DUNNING_CASE_ID"] = str(recovery_case_id)
+    else:
+        # A demo run with no case. Clear any inherited value rather than let
+        # the sample conversation act on whatever the last call was bound to.
+        env.pop("DUNNING_CASE_ID", None)
+
     return MCPClient(
         server_params=StdioServerParameters(
             command=sys.executable,
             args=["-m", "app.mcp_server"],
-            env=dict(os.environ),
+            env=env,
         ),
         tools_filter=["send_payment_link", "get_case"],
     )
@@ -670,7 +720,7 @@ async def run_call(transport, session: DunningSession) -> DunningSession:
 
     # The money tools come from our MCP server, so any MCP-speaking agent gets
     # the same guarantees rather than a second implementation of them.
-    async with recovery_mcp() as mcp:
+    async with recovery_mcp(session.recovery_case_id) as mcp:
         mcp_tools = await mcp.register_tools(llm)
         session.llm_context.set_tools(
             ToolsSchema(
@@ -735,9 +785,14 @@ async def _run_pipeline(session, transport, stt, llm, tts, aggregators) -> Dunni
 
 
 #: Only the transports we can actually exercise. WebRTC is the browser demo;
-#: Plivo and Exotel are the reason Pipecat is here at all -- both are plain
+#: the carriers are the reason Pipecat is here at all -- all three are plain
 #: websocket transports whose serializer `create_transport` fills in, so adding
 #: them costs a line each rather than a SIP trunk negotiation.
+#:
+#: Twilio is the one to reach for first: a trial account issues a number without
+#: the KYC an Indian number needs, and `create_transport` recognises Twilio's
+#: handshake and builds the serializer from TWILIO_ACCOUNT_SID/AUTH_TOKEN in the
+#: environment. `app/voice/telephony.py` places the call that arrives here.
 #:
 #: No VAD here: since 1.0 it lives on the user aggregator (see `build_vad`).
 TRANSPORT_PARAMS = {
@@ -746,6 +801,7 @@ TRANSPORT_PARAMS = {
         audio_out_enabled=True,
         audio_in_filter=build_noise_filter(),
     ),
+    "twilio": lambda: _telephony_params(),
     "plivo": lambda: _telephony_params(),
     "exotel": lambda: _telephony_params(),
 }

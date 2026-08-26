@@ -87,7 +87,9 @@ def test_payload_carries_both_attribution_keys(session=None):
     customer = Customer(razorpay_customer_id="c", name="A", phone="+91900", email="a@b.c")
     payload = build_payload(case, customer, settings=SETTINGS, expire_at=123)
 
-    assert payload["reference_id"] == "recovery-7"
+    # Attempt-suffixed: Razorpay reserves a reference_id account-wide forever,
+    # so keying on the case alone made the second link a case ever needs a 400.
+    assert payload["reference_id"] == "recovery-7-0"
     assert payload["notes"]["recovery_case_id"] == "7"
 
 
@@ -244,3 +246,31 @@ async def test_payment_captured_with_list_notes_does_not_crash(session, fake_cli
 
     await session.refresh(case)
     assert case.status == CaseStatus.IN_PROGRESS
+
+
+def test_a_second_attempt_gets_a_fresh_reference():
+    """Razorpay reserves reference_id account-wide and forever. Keyed on the
+    case alone, a case needing a second link is refused outright:
+
+        400 payment link with given reference_id: recovery-1 already exists
+    """
+    case = RecoveryCase(id=1, razorpay_payment_id="p", original_amount=1000)
+    case.attempt_count = 0
+    first = reference_id_for(case)
+    case.attempt_count = 1
+    assert reference_id_for(case) != first
+
+
+def test_an_unflushed_case_does_not_send_the_string_None():
+    """attempt_count is None until the row is flushed, and 'recovery-7-None'
+    would be a real reference Razorpay reserves permanently."""
+    case = RecoveryCase(id=7, razorpay_payment_id="p", original_amount=1000)
+    assert "None" not in reference_id_for(case)
+
+
+def test_links_written_before_the_suffix_still_attribute():
+    """Those payments are real money; reconciliation cannot stop working
+    because the reference format moved on."""
+    assert case_id_from_reference("recovery-1") == 1
+    assert case_id_from_reference("recovery-1-0") == 1
+    assert case_id_from_reference("recovery-42-7") == 42

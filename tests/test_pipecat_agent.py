@@ -14,6 +14,7 @@ would start, sound configured, and never detect a turn.
 
 import pytest
 
+from app.voice.flow import halt_note
 from app.voice.intents import CallIntent
 from app.voice.pipecat_agent import (
     HINDI_CLIP_GROUPS,
@@ -61,6 +62,42 @@ def test_a_pre_rendered_amount_wins():
     """The dispatcher may know a spoken form we cannot rebuild from paise."""
     context = context_from_body({**BODY, "amount_spoken": "साढ़े चार सौ रुपये"})
     assert context["amount_spoken"] == "साढ़े चार सौ रुपये"
+
+
+@pytest.mark.parametrize("value", [False, "false", "False", "0", "", None])
+def test_a_halt_flag_that_crossed_a_wire_as_a_string_stays_false(value):
+    """Twilio delivers every parameter as a string, where bool("false") is True.
+
+    Reading it wrong tells the agent the subscription has stopped when it has
+    not, which changes what it says on a live money call.
+    """
+    context = context_from_body({**BODY, "subscription_halted": value})
+    assert context["halt_note"] == halt_note(False)
+
+
+@pytest.mark.parametrize("value", [True, "true", "1"])
+def test_a_genuine_halt_still_reaches_the_agent(value):
+    context = context_from_body({**BODY, "subscription_halted": value})
+    assert context["halt_note"] == halt_note(True)
+
+
+@pytest.mark.parametrize("value", [7, "7"])
+def test_the_case_id_is_an_int_however_it_arrived(value):
+    """Twilio sends "7"; persistence needs 7.
+
+    Left as a string it reaches asyncpg as a parameter for an integer column and
+    is rejected -- and persistence swallows its own failures on purpose, so the
+    call would sound perfect and never send the payment link.
+    """
+    session = DunningSession(context_from_body({**BODY, "recovery_case_id": value}))
+    assert session.recovery_case_id == 7
+
+
+@pytest.mark.parametrize("value", [None, "", "not-a-case"])
+def test_an_unusable_case_id_becomes_no_case_rather_than_a_bad_one(value):
+    """A demo run with no case must write nothing, not write to case 0."""
+    session = DunningSession(context_from_body({**BODY, "recovery_case_id": value}))
+    assert session.recovery_case_id is None
 
 
 def test_an_empty_body_still_renders():

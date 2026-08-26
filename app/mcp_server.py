@@ -19,6 +19,7 @@ case. Recovery is something only a real Razorpay webhook may assert.
 """
 
 import logging
+import os
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
@@ -38,18 +39,42 @@ load_dotenv()
 mcp = FastMCP("dunning-recovery")
 
 
+def _bound_case_id() -> int | None:
+    """The one case this server process is allowed to act on.
+
+    Injected by the caller that spawns us, never supplied by the model. An
+    earlier version took ``recovery_case_id`` as a tool argument and the model
+    did exactly what you would expect of a number it was never told: it
+    invented one (12345) and the link silently failed to send.
+
+    The hallucination is the mild failure. The dangerous one is a plausible
+    id -- there is no reason a model guessing at integers would miss by much,
+    and the tool would then have sent a stranger's payment link to whoever is
+    on this call. Binding it here means the agent cannot name a case at all.
+    """
+    raw = os.environ.get("DUNNING_CASE_ID")
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("DUNNING_CASE_ID is not an integer: %r", raw)
+        return None
+
+
 @mcp.tool()
-async def send_payment_link(recovery_case_id: int) -> dict:
+async def send_payment_link() -> dict:
     """Send the customer their Razorpay payment link by SMS and email.
 
-    Call this the moment the customer agrees to pay. Returns ``sent: true`` with
-    the link, or ``sent: false`` with a reason -- never claim a link was sent
-    unless this returns ``sent: true``.
+    Call this the moment the customer agrees to pay. Takes no arguments -- the
+    account is already known from the call. Returns ``sent: true`` with the
+    link, or ``sent: false`` with a reason; never claim a link was sent unless
+    this returns ``sent: true``.
 
     Asking twice is safe: the existing link is returned rather than a second one
     being created for the same debt.
     """
-    result = await send_payment_link_now(recovery_case_id)
+    result = await send_payment_link_now(_bound_case_id())
     if result.get("sent"):
         return {
             "sent": True,
@@ -70,11 +95,17 @@ async def send_payment_link(recovery_case_id: int) -> dict:
 
 
 @mcp.tool()
-async def get_case(recovery_case_id: int) -> dict:
-    """Look up a recovery case: amount, why the payment failed, and who it is for.
+async def get_case() -> dict:
+    """Look up this call's recovery case: the amount, why the payment failed,
+    and who it is for.
 
-    Read-only. Use it to answer a customer asking what the charge was for.
+    Read-only, and scoped to the customer you are speaking to -- it takes no
+    arguments, so it can never read someone else's account.
     """
+    recovery_case_id = _bound_case_id()
+    if recovery_case_id is None:
+        return {"found": False}
+
     async with SessionLocal() as session:
         case = await session.get(RecoveryCase, recovery_case_id)
         if case is None:

@@ -40,17 +40,37 @@ class PaymentLink:
 
 
 def reference_id_for(case: RecoveryCase) -> str:
-    """Razorpay caps reference_id at 40 characters; this is well inside it."""
-    return f"{REFERENCE_PREFIX}{case.id}"
+    """Razorpay caps reference_id at 40 characters; this is well inside it.
+
+    Carries the attempt as well as the case, because Razorpay enforces
+    uniqueness on this field across the whole account and forever. Keyed on the
+    case alone, the second link a case ever needs is rejected outright:
+
+        400 payment link with given reference_id: recovery-1 already exists
+
+    which is a real 400 we hit -- the account still held ``recovery-1`` from an
+    earlier database whose case ids started at 1 too. One Razorpay account
+    outlives any one deployment of this, so the reference has to be unique per
+    attempt rather than per row.
+    """
+    # `or 0` rather than the raw value: a case built in memory and not yet
+    # flushed has attempt_count None, and "recovery-7-None" would be sent to
+    # Razorpay as a real, permanently-reserved reference.
+    return f"{REFERENCE_PREFIX}{case.id}-{case.attempt_count or 0}"
 
 
 def case_id_from_reference(reference_id: str | None) -> int | None:
-    """Inverse of :func:`reference_id_for`. None if it is not one of ours."""
+    """Inverse of :func:`reference_id_for`. None if it is not one of ours.
+
+    Reads only the case segment, so links written before the attempt suffix
+    existed (``recovery-1``) still attribute correctly -- those payments are
+    real money and must not stop reconciling because the format moved on.
+    """
     if not reference_id or not reference_id.startswith(REFERENCE_PREFIX):
         return None
     try:
-        return int(reference_id[len(REFERENCE_PREFIX) :])
-    except ValueError:
+        return int(reference_id[len(REFERENCE_PREFIX) :].split("-")[0])
+    except (ValueError, IndexError):
         return None
 
 
