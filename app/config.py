@@ -69,6 +69,21 @@ class Settings(BaseSettings):
     # Created in LiveKit against a SIP provider (Twilio/Plivo/Exotel). Without
     # it there is no way to dial a phone number.
     livekit_sip_trunk_id: str = ""
+
+    # --- Twilio (outbound telephony) ---
+    # The reachable alternative to a LiveKit SIP trunk: a trial account issues a
+    # number immediately, and Media Streams carry the audio over a websocket. The
+    # number need not be Indian -- a US trial number dialling a verified mobile is
+    # enough to exercise the loop end to end.
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    # E.164, the Twilio number that appears as the caller.
+    twilio_from_number: str = ""
+    # Public wss:// address of the agent's telephony websocket -- an ngrok tunnel
+    # in development, the deployed service in production. Twilio dials out from
+    # its own network, so localhost is never reachable.
+    twilio_stream_url: str = ""
+    twilio_api_base: str = "https://api.twilio.com/2010-04-01"
     # Name the agent introduces itself with.
     company_name: str = "Acme"
     # Sarvam / Gemini / Cartesia keys are read from the environment by their
@@ -120,6 +135,15 @@ class Settings(BaseSettings):
     @property
     def livekit_configured(self) -> bool:
         return bool(self.livekit_url and self.livekit_api_key and self.livekit_api_secret)
+
+    @property
+    def twilio_configured(self) -> bool:
+        return bool(
+            self.twilio_account_sid
+            and self.twilio_auth_token
+            and self.twilio_from_number
+            and self.twilio_stream_url
+        )
 
 
 @lru_cache

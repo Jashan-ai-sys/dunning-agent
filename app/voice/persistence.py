@@ -29,12 +29,21 @@ logger = logging.getLogger(__name__)
 
 
 async def open_call_record(
-    *, recovery_case_id: int | None, room_name: str, dialled_number: str | None = None
+    *,
+    recovery_case_id: int | None,
+    room_name: str,
+    dialled_number: str | None = None,
+    provider: str = "livekit",
 ) -> int | None:
     """Record that a call started. Returns the voice_calls id, or None.
 
     Written at the start rather than the end so an abandoned or crashed call
     still leaves a trace -- a call that vanished is itself a finding.
+
+    ``provider`` is who actually carried the call. It defaults to LiveKit
+    because that path predates the others and passes nothing, but a wrong value
+    here is not cosmetic: the audit trail is the evidence that a customer was
+    contacted, and it should name the carrier that did it.
     """
     if not recovery_case_id:
         logger.info("no recovery_case_id in metadata; not recording this call")
@@ -49,7 +58,7 @@ async def open_call_record(
 
             call = VoiceCall(
                 recovery_case_id=case.id,
-                provider="livekit",
+                provider=provider,
                 room_name=room_name,
                 dialled_number=dialled_number,
                 status="initiated",

@@ -12,7 +12,7 @@ import argparse
 import asyncio
 import logging
 
-from app.channels import LoggingChannel
+from app.channels import ContactChannel, build_channel
 from app.config import get_settings
 from app.db import SessionLocal, engine
 from app.orchestrator import run_once
@@ -21,9 +21,14 @@ from app.webhooks.processor import replay_unprocessed
 logger = logging.getLogger(__name__)
 
 
-async def tick() -> None:
+async def tick(channel: ContactChannel) -> None:
     """One full pass. Errors are logged, never fatal -- the loop must survive a
-    bad batch or a transient database blip."""
+    bad batch or a transient database blip.
+
+    The channel is passed in rather than built here: it is chosen once from
+    configuration that cannot change mid-process, and rebuilding it every minute
+    would repeat its startup warning on every tick.
+    """
     try:
         await replay_unprocessed()
     except Exception:
@@ -31,7 +36,7 @@ async def tick() -> None:
 
     try:
         async with SessionLocal() as session:
-            result = await run_once(session, LoggingChannel())
+            result = await run_once(session, channel)
         if result.considered:
             logger.info("orchestrator tick %s", result.as_dict())
     except Exception:
@@ -44,16 +49,21 @@ async def main(once: bool = False) -> None:
         level=settings.log_level,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    # Before the loop, so a misconfigured channel fails loudly at startup rather
+    # than once a minute into a log nobody is reading.
+    channel = build_channel()
+    logger.info("contacting customers over %s", channel.name)
+
     try:
         if once:
             # Cloud Run Jobs invoke the container once per schedule tick, so the
             # loop lives in Cloud Scheduler rather than in this process.
             logger.info("worker running a single tick")
-            await tick()
+            await tick(channel)
             return
         logger.info("worker started, interval %ss", settings.worker_interval_seconds)
         while True:
-            await tick()
+            await tick(channel)
             await asyncio.sleep(settings.worker_interval_seconds)
     finally:
         await engine.dispose()

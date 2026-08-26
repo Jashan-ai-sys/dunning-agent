@@ -862,14 +862,49 @@ async def _demo_body() -> dict:
     return SAMPLE_BODY
 
 
+def telephony_body(runner_args: RunnerArguments) -> dict | None:
+    """The case, as the carrier delivered it on the handshake.
+
+    Twilio carries our TwiML `<Parameter>` entries as `customParameters`, and
+    Pipecat parses them onto `runner_args.call_data` while building the
+    transport -- *not* onto `runner_args.body`, which only the Daily and CLI
+    paths populate.
+
+    Reading the wrong one fails silently, which is why this is its own
+    function: the call still connects and the agent still talks, but it talks
+    to the sample customer about the sample amount. On a real recovery call
+    that is a stranger being told someone else's billing details.
+    """
+    call_data = getattr(runner_args, "call_data", None)
+    if not call_data:
+        return None
+    try:
+        return call_data.get("body") or None
+    except Exception:  # noqa: BLE001 - a malformed handshake must not kill the call
+        logger.exception("could not read the call body from the handshake")
+        return None
+
+
+def telephony_provider(runner_args: RunnerArguments) -> str:
+    """Who carried this call, for the audit trail. Detected from the handshake."""
+    return getattr(runner_args, "transport_type", None) or "pipecat"
+
+
 async def bot(runner_args: RunnerArguments) -> None:
     """Entry point. The Pipecat runner discovers this by name.
 
         uv run --group pipecat python -m app.voice.pipecat_agent -t webrtc
 
     The body carries the case, exactly as job metadata does on LiveKit.
+
+    The transport is built first because on a telephony leg the case *arrives*
+    with the transport: `create_transport` parses the carrier's handshake, and
+    the customParameters are only readable afterwards. Nothing is lost by the
+    reordering -- the call record is still written before any audio flows.
     """
-    body = runner_args.body or await _demo_body()
+    transport = await create_transport(runner_args, TRANSPORT_PARAMS)
+
+    body = runner_args.body or telephony_body(runner_args) or await _demo_body()
 
     # Raises before any audio flows if the context is incomplete, rather than
     # reading a literal "{customer_name}" down the line.
@@ -878,12 +913,12 @@ async def bot(runner_args: RunnerArguments) -> None:
         recovery_case_id=session.recovery_case_id,
         room_name=body.get("room_name", "pipecat"),
         dialled_number=body.get("phone"),
+        provider=telephony_provider(runner_args),
     )
 
-    # Before the transport, so the clips are on disk by the time audio flows.
+    # Before the pipeline runs, so the clips are on disk by the time audio flows.
     await prewarm_backchannel(session.language)
 
-    transport = await create_transport(runner_args, TRANSPORT_PARAMS)
     try:
         await run_call(transport, session)
     finally:
@@ -895,7 +930,8 @@ async def bot(runner_args: RunnerArguments) -> None:
 __all__ = ["DunningSession", "SpokenFormFilter", "bot", "build_backchannel",
            "build_llm", "build_services", "build_turn_strategies", "build_vad",
            "call_context", "context_from_body", "get_backchannel",
-           "normalize_for_speech", "prewarm_backchannel", "run_call"]
+           "normalize_for_speech", "prewarm_backchannel", "run_call",
+           "telephony_body", "telephony_provider"]
 
 
 if __name__ == "__main__":

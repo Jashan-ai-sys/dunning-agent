@@ -9,6 +9,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from app.config import get_settings
 from app.models import Customer, RecoveryCase
 
 logger = logging.getLogger(__name__)
@@ -60,3 +61,34 @@ class LoggingChannel:
                 "placed": False,
             },
         )
+
+
+def build_channel() -> ContactChannel:
+    """The best channel the current configuration can actually place a call on.
+
+    Ordered by what each one needs. Twilio needs a number and a public
+    websocket; LiveKit additionally needs an outbound SIP trunk negotiated with
+    a carrier, which is why it sits second despite arriving first. Falling back
+    to ``LoggingChannel`` is deliberate: an unconfigured deployment should keep
+    working the cases and say plainly that nobody was called, rather than crash
+    the worker on startup.
+
+    Imports are local because ``dispatch`` pulls in the LiveKit SDK at module
+    level, and a Twilio deployment should not have to install it.
+    """
+    settings = get_settings()
+
+    if settings.twilio_configured:
+        from app.voice.telephony import TwilioChannel
+
+        return TwilioChannel()
+
+    if settings.livekit_configured and settings.livekit_sip_trunk_id:
+        from app.voice.dispatch import LiveKitChannel
+
+        return LiveKitChannel()
+
+    logger.warning(
+        "no telephony configured; recovery cases will be worked but nobody will be called"
+    )
+    return LoggingChannel()
