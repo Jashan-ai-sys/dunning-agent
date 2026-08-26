@@ -61,30 +61,41 @@ def call_body(case: RecoveryCase, customer: Customer, *, company_name: str) -> d
 async def load_call_body(recovery_case_id: int) -> dict[str, Any] | None:
     """Build the body for a case straight from the database.
 
-    Returns None rather than raising: a demo run pointed at a case that does not
-    exist should fall back to the sample, not crash before anyone speaks.
+    Returns None rather than raising, for *any* reason it cannot produce a body
+    -- unknown case, missing customer, or a database that is simply not there.
+    The caller falls back to a sample and the agent still talks.
+
+    That last case is the one that matters. This runs before the transport
+    exists, so an exception here does not degrade the call, it prevents it:
+    the caller never gets a session, and a customer who picked up hears
+    silence. A recovery agent that cannot read its own database has lost the
+    ability to *personalise* a call, not the ability to make one.
     """
-    async with SessionLocal() as session:
-        case = await session.get(RecoveryCase, recovery_case_id)
-        if case is None:
-            logger.warning("no recovery case %s", recovery_case_id)
-            return None
+    try:
+        async with SessionLocal() as session:
+            case = await session.get(RecoveryCase, recovery_case_id)
+            if case is None:
+                logger.warning("no recovery case %s", recovery_case_id)
+                return None
 
-        customer = None
-        if case.razorpay_customer_id:
-            customer = (
-                await session.execute(
-                    select(Customer).where(
-                        Customer.razorpay_customer_id == case.razorpay_customer_id
+            customer = None
+            if case.razorpay_customer_id:
+                customer = (
+                    await session.execute(
+                        select(Customer).where(
+                            Customer.razorpay_customer_id == case.razorpay_customer_id
+                        )
                     )
-                )
-            ).scalar_one_or_none()
+                ).scalar_one_or_none()
 
-        if customer is None:
-            logger.warning("case %s has no customer record", recovery_case_id)
-            return None
+            if customer is None:
+                logger.warning("case %s has no customer record", recovery_case_id)
+                return None
 
-        return call_body(case, customer, company_name=get_settings().company_name)
+            return call_body(case, customer, company_name=get_settings().company_name)
+    except Exception:  # noqa: BLE001 - never let the database silence the agent
+        logger.exception("could not load recovery case %s", recovery_case_id)
+        return None
 
 
 __all__ = ["call_body", "load_call_body"]
