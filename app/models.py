@@ -41,6 +41,20 @@ class WebhookEvent(Base, TimestampMixin):
     signature_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     processing_error: Mapped[str | None] = mapped_column(Text)
+    #: How many times a handler has been tried on this envelope. Without it
+    #: there is no way to tell a blip from an event that will never succeed.
+    attempt_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    #: Dead-lettered: given up on, and skipped by the replay sweep.
+    #:
+    #: The sweep reads the oldest unprocessed rows first, so an envelope that
+    #: fails deterministically sorts to the front of every pass forever. Once
+    #: there are more of those than the sweep's limit, no newer event is
+    #: replayed again -- and because ``record_event`` dedupes on
+    #: ``razorpay_event_id``, Razorpay's own redelivery is a no-op, making the
+    #: sweep the only retry path there is. This column is what lets it move on.
+    dead_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     __table_args__ = (Index("ix_webhook_events_unprocessed", "processed_at"),)
 
@@ -56,6 +70,40 @@ class Customer(Base, TimestampMixin):
     # 'hi' | 'en' | 'hinglish' -- drives the voice agent prompt. Hindi by
     # default; the agent still mirrors whatever the customer actually speaks.
     preferred_language: Mapped[str] = mapped_column(String(16), nullable=False, default="hi")
+    # Set when a call establishes we must never dial this person again: an
+    # explicit refusal, a wrong number, a disputed charge.
+    #
+    # Held on the customer rather than the case because the obligation follows
+    # the person, not the debt. A second failed charge opens a second case, and
+    # a case-scoped suppression would happily call a wrong number all over
+    # again -- which is the compliance and privacy problem, not a smaller
+    # version of it.
+    #: Nothing clears this today. A dispute later resolved in the merchant's
+    #: favour leaves the customer unreachable until somebody clears the flag by
+    #: hand, which is the safe direction to fail but is not a workflow yet.
+    do_not_contact: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    #: The CallIntent that closed the door, kept for the audit trail.
+    do_not_contact_reason: Mapped[str | None] = mapped_column(String(64))
+    do_not_contact_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Someone else answered this number. That is a fact about the *number*, not
+    # about the customer: suppressing the whole person would also block an
+    # email payment link that has nothing to do with the bad phone, and the
+    # debt is still owed. Kept as a flag rather than by blanking ``phone``
+    # because ``upsert_customer`` refreshes that field from Razorpay.
+    phone_is_wrong: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    # When we last contacted this *person*, by any channel, about any debt.
+    #
+    # The attempt budget and backoff are per case, which silently assumed one
+    # case per customer. That does not hold: four cases opened against one
+    # subscription in two hours from repeated authorisation attempts, and each
+    # carried its own untouched budget. Nothing in the policy said "do not ring
+    # the same person four times in a minute", because nothing had to until
+    # cases stopped being one-per-debt.
+    last_contacted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Subscription(Base, TimestampMixin):
@@ -80,6 +128,9 @@ class Payment(Base, TimestampMixin):
     razorpay_invoice_id: Mapped[str | None] = mapped_column(String(64), index=True)
     razorpay_subscription_id: Mapped[str | None] = mapped_column(String(64), index=True)
     razorpay_customer_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    #: Present on every payment. The only linkage a one-off checkout failure
+    #: has -- it carries no invoice and no subscription.
+    razorpay_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
     amount: Mapped[int] = mapped_column(Integer, nullable=False)  # paise
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="INR")
     status: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -102,10 +153,35 @@ class RecoveryCase(Base, TimestampMixin):
     razorpay_invoice_id: Mapped[str | None] = mapped_column(String(64))
     razorpay_subscription_id: Mapped[str | None] = mapped_column(String(64), index=True)
     razorpay_customer_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    #: The order a checkout case belongs to. A subscription charge has one too,
+    #: but only checkout recovery attributes payment back through it -- an
+    #: abandoned checkout has no invoice and no subscription to reconcile by.
+    razorpay_order_id: Mapped[str | None] = mapped_column(String(64), index=True)
     original_amount: Mapped[int] = mapped_column(Integer, nullable=False)  # paise
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="INR")
+    #: Razorpay's coarse class: BAD_REQUEST_ERROR, GATEWAY_ERROR, SERVER_ERROR.
     failure_code: Mapped[str | None] = mapped_column(String(64))
+    #: ``error_description`` -- prose, written for a human, and changed without
+    #: notice. Displayed and logged, never branched on.
     failure_reason: Mapped[str | None] = mapped_column(Text)
+    #: ``error_source`` -- who the failure belongs to: customer, issuer, bank,
+    #: gateway, internal, business. The stable half of the diagnosis.
+    failure_source: Mapped[str | None] = mapped_column(String(32))
+    #: ``error_reason`` -- the machine-readable cause, e.g. insufficient_funds.
+    #: Kept apart from ``failure_reason`` precisely because that one is prose.
+    failure_reason_code: Mapped[str | None] = mapped_column(String(64))
+    #: ``error_step`` -- how far the customer got: payment_initiation,
+    #: payment_authentication, payment_authorization. The difference between
+    #: "a charge was attempted on their behalf" and "they were sitting there
+    #: trying to pay", which is what the calling priority turns on.
+    failure_step: Mapped[str | None] = mapped_column(String(64))
+    #: Calling priority, 1 is most urgent. Denormalised so the claim query can
+    #: order on it: the tier is a pure function of the failure columns above,
+    #: which never change after the case is opened, so it cannot drift.
+    #: :mod:`app.priority` is the source of truth for how it is derived.
+    priority_tier: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=4, server_default="4", index=True
+    )
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="open", index=True)
     # 'razorpay' for cases opened by a real webhook, 'seed' for synthetic demo
     # data. Kept in the schema rather than a naming convention, so simulated
@@ -115,9 +191,32 @@ class RecoveryCase(Base, TimestampMixin):
     )
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    # Consecutive failures on *our* side -- telephony down, Razorpay refusing
+    # the link. Counted separately from attempt_count on purpose: an outage
+    # must not spend the customer's contact budget. But something has to bound
+    # it, or a case whose delivery can never succeed retries every backoff
+    # window forever and never reaches max_attempts. Reset by any success.
+    delivery_failures: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # When this case is next worth looking at. Written whenever the policy
+    # parks a case, and honoured by the orchestrator's claim query so that
+    # waiting cases do not occupy the batch.
+    #
+    # Without it the queue starves: a parked case stays OPEN and is among the
+    # oldest rows, so it sorts to the front of every batch and, once enough of
+    # them accumulate to fill worker_batch_size, nothing newer is ever claimed.
+    next_eligible_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), index=True
+    )
     # Set when Razorpay stops its own retries -- the hard escalation signal.
     halted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # A promise to pay, made on a call. Kept as two timestamps rather than a
+    # status so "kept" stays *derived* -- a promise is kept when the money
+    # arrives before the deadline, and nothing has to remember to update a flag.
+    promised_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    promise_due_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     recovered_payment_id: Mapped[str | None] = mapped_column(String(64))
     recovered_amount: Mapped[int | None] = mapped_column(Integer)
     recovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
