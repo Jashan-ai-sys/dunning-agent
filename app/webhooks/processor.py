@@ -26,6 +26,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import cache
 from app.config import Settings, get_settings
 from app.db import SessionLocal
 from app.models import WebhookEvent
@@ -44,6 +45,20 @@ async def record_event(
     payload: dict[str, Any],
 ) -> WebhookEvent | None:
     """Persist the envelope. Returns None if this event was already recorded."""
+    # Ask the cache first. Razorpay redelivers, and our own sweep re-dispatches,
+    # so duplicates are ordinary traffic rather than an edge case -- and every
+    # one of them currently costs an INSERT that is guaranteed to fail.
+    #
+    # The cache can only ever say "definitely seen". A miss falls through to
+    # the unique constraint, which is what actually guarantees uniqueness; if
+    # Redis is down or lying, the database still refuses the duplicate.
+    settings = get_settings()
+    if await cache.seen(
+        f"webhook:{razorpay_event_id}", settings.redis_event_ttl_seconds
+    ):
+        logger.info("event %s already seen (cache)", razorpay_event_id)
+        return None
+
     event = WebhookEvent(
         razorpay_event_id=razorpay_event_id,
         event=event_name,
@@ -56,6 +71,12 @@ async def record_event(
     except IntegrityError:
         await session.rollback()
         return None
+    except Exception:
+        # The claim is only honest if it is released when the write it guarded
+        # did not happen. Leaving it set would make a retry of a *failed*
+        # insert look like a duplicate and drop the event entirely.
+        await cache.forget(f"webhook:{razorpay_event_id}")
+        raise
     await session.refresh(event)
     return event
 

@@ -6,12 +6,13 @@ so the audit trail explains not just what happened but why.
 """
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import cache
 from app.channels import ContactChannel
 from app.config import Settings, get_settings
 from app.constants import ActionType, CaseStatus
@@ -38,6 +39,9 @@ class TickResult:
     stopped: int = 0
     #: Of the stopped, how many were closed because *we* are misconfigured.
     needs_human: int = 0
+    #: Customers contacted this tick, to be published to the shared cooldown
+    #: cache once the transaction that contacted them has committed.
+    pending_cooldowns: list[str] = field(default_factory=list)
     waiting: int = 0
     failed: int = 0
 
@@ -120,6 +124,15 @@ async def run_once(
     for case in await _claim_actionable_cases(session, settings.worker_batch_size, now=now):
         result.considered += 1
         customer = await _customer_for(session, case)
+
+        # Another worker may have contacted this person seconds ago, in a
+        # transaction that has not reached our snapshot. The column check
+        # inside decide() is still the rule; this catches the window the
+        # database cannot, and only ever adds a wait -- never removes one.
+        if customer is not None and await _contacted_elsewhere(customer, settings):
+            result.waiting += 1
+            continue
+
         decision = decide(case, customer, now=now, settings=settings)
 
         if decision.action is Action.WAIT:
@@ -170,7 +183,30 @@ async def run_once(
         _record_delivery(case, customer, result, delivered, "contacted", now=now)
 
     await session.commit()
+
+    # Published after the commit, deliberately. A cooldown announced before the
+    # contact is durable would suppress a retry of work that never happened.
+    for customer_id in result.pending_cooldowns:
+        await cache.claim(
+            f"cooldown:{customer_id}",
+            settings.customer_contact_cooldown_hours * 3600,
+        )
     return result
+
+
+async def _contacted_elsewhere(customer: Customer, settings: Settings) -> bool:
+    """Has another worker just contacted this person?
+
+    Reads the shared cooldown without taking it: a claim here would mark the
+    customer as contacted before we had actually contacted them, and a case
+    that then failed to dial would have spent someone else's quiet period.
+
+    False whenever Redis is absent or unsure, so the durable rule in decide()
+    remains the only thing that can *stop* work.
+    """
+    if not settings.redis_url.strip():
+        return False
+    return await cache.seen_only(f"cooldown:{customer.razorpay_customer_id}")
 
 
 def _record_delivery(
@@ -198,6 +234,12 @@ def _record_delivery(
         case.delivery_failures = 0
         customer.last_contacted_at = now
         setattr(result, counter, getattr(result, counter) + 1)
+        # Mirror the cooldown into the shared cache. The column is still the
+        # rule; this is what lets a *second worker on another machine* see it
+        # before this transaction commits. A row lock serialises one
+        # transaction, not a fleet, and the failure it prevents is the same
+        # person being rung once per debt by two workers at once.
+        result.pending_cooldowns.append(customer.razorpay_customer_id)
     else:
         case.delivery_failures = (case.delivery_failures or 0) + 1
         result.failed += 1

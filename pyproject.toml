@@ -13,6 +13,10 @@ dependencies = [
     "httpx>=0.28",
     # zoneinfo has no tz database on Windows; the contact-window rule needs one.
     "tzdata>=2024.2",
+    # Optional at runtime: every cache call degrades to a miss when REDIS_URL
+    # is unset, so the dependency is here rather than the code being
+    # conditional on the import.
+    "redis>=5.0",
 ]
 
 [dependency-groups]

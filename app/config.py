@@ -17,6 +17,18 @@ class Settings(BaseSettings):
     razorpay_webhook_secret: str = ""
     razorpay_api_base: str = "https://api.razorpay.com/v1"
 
+    # Optional shared cache. Empty means no Redis, which is the default and
+    # a supported configuration -- every cache call degrades to a miss and
+    # the service behaves exactly as it did before Redis existed.
+    #
+    # Redis is never the authority here. Postgres decides; this only saves
+    # the round trip when the answer is already known, and coordinates the
+    # contact cooldown across workers, which a row lock cannot do.
+    redis_url: str = ""
+    # How long a webhook event id is remembered. Longer than any
+    # plausible redelivery window; the unique constraint covers forever.
+    redis_event_ttl_seconds: int = 86_400
+
     # --- Recovery policy ---
     # Below this, a voice call costs more than the debt is worth.
     min_recoverable_amount_paise: int = 5_000  # Rs 50
