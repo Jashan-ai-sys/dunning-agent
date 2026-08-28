@@ -88,6 +88,27 @@ def customer_entity(customer_id: str = "cust_1") -> dict[str, Any]:
     }
 
 
+def order_entity(
+    order_id: str = "order_1",
+    *,
+    amount: int = 49900,
+    status: str = "paid",
+) -> dict[str, Any]:
+    return {
+        "id": order_id,
+        "entity": "order",
+        "amount": amount,
+        "amount_paid": amount if status == "paid" else 0,
+        "amount_due": 0 if status == "paid" else amount,
+        "currency": "INR",
+        "receipt": "rcpt_1",
+        "status": status,
+        "attempts": 1,
+        "notes": {},
+        "created_at": 1700000000,
+    }
+
+
 def event(event_name: str, payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "entity": "event",
@@ -107,6 +128,54 @@ def payment_captured_event(payment_id: str = "pay_OK1", **kwargs) -> dict[str, A
     return event(
         "payment.captured",
         {"payment": {"entity": payment_entity(payment_id, status="captured", **kwargs)}},
+    )
+
+
+def order_paid_event(order_id: str = "order_1", **kwargs) -> dict[str, Any]:
+    return event(
+        "order.paid",
+        {
+            "order": {"entity": order_entity(order_id)},
+            "payment": {
+                "entity": payment_entity(status="captured", invoice_id=None, **kwargs)
+            },
+        },
+    )
+
+
+def payment_link_paid_event(
+    *,
+    reference_id: str,
+    payment_link_id: str = "plink_1",
+    payment_id: str = "pay_LINKPAID",
+    amount: int = 49900,
+) -> dict[str, Any]:
+    """The event Razorpay sends when one of our recovery links is paid.
+
+    ``reference_id`` is the attribution key -- a first-class field on the link
+    entity rather than a note that has to survive the hop onto the payment.
+    """
+    return event(
+        "payment_link.paid",
+        {
+            "payment_link": {
+                "entity": {
+                    "id": payment_link_id,
+                    "entity": "payment_link",
+                    "status": "paid",
+                    "amount": amount,
+                    "amount_paid": amount,
+                    "currency": "INR",
+                    "reference_id": reference_id,
+                    "notes": {},
+                }
+            },
+            "payment": {
+                "entity": payment_entity(
+                    payment_id, status="captured", amount=amount, invoice_id=None
+                )
+            },
+        },
     )
 
 

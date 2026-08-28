@@ -2,9 +2,11 @@
 
 from sqlalchemy import func, select
 
-from app.constants import ActionType, CaseStatus
+from app.constants import ActionType, CaseSource, CaseStatus
 from app.models import Customer, Payment, RecoveryAction, RecoveryCase, Subscription
+from app.priority import Priority
 from app.webhooks.handlers import (
+    handle_order_paid,
     handle_payment_captured,
     handle_payment_failed,
     handle_subscription_charged,
@@ -13,6 +15,7 @@ from app.webhooks.handlers import (
 )
 from tests.payloads import (
     invoice_entity,
+    order_paid_event,
     payment_captured_event,
     payment_failed_event,
     subscription_charged_event,
@@ -196,3 +199,160 @@ async def test_unrelated_capture_does_not_close_a_case(session, fake_client):
 
     case = (await _cases(session))[0]
     assert case.status == CaseStatus.OPEN
+
+
+# --- Abandoned checkout ---------------------------------------------------
+
+
+async def _known_customer(session, phone="+919000000000", email="a@example.com"):
+    customer = Customer(razorpay_customer_id="cust_known", phone=phone, email=email)
+    session.add(customer)
+    await session.commit()
+    return customer
+
+
+async def test_a_failed_checkout_by_a_known_customer_opens_a_case(session, fake_client):
+    """Somebody reached the payment page, tried, and it broke under them. Until
+    now this was logged and dropped for having no subscription behind it."""
+    await _known_customer(session)
+
+    await handle_payment_failed(
+        session, payment_failed_event(invoice_id=None), fake_client
+    )
+    await session.commit()
+
+    cases = await _cases(session)
+    assert len(cases) == 1
+    assert cases[0].source == CaseSource.CHECKOUT
+    assert cases[0].razorpay_order_id == "order_1"
+    assert cases[0].priority_tier == Priority.CHECKOUT_ABANDONED
+    assert ActionType.CHECKOUT_ABANDONED in await _actions(session, cases[0].id)
+
+
+async def test_a_new_checkout_case_is_parked_through_its_grace_window(session, fake_client):
+    """A customer who retries with another card two minutes later has not
+    abandoned anything. Chasing them mid-purchase would be absurd."""
+    await _known_customer(session)
+
+    await handle_payment_failed(
+        session, payment_failed_event(invoice_id=None), fake_client
+    )
+    await session.commit()
+
+    case = (await _cases(session))[0]
+    assert case.next_eligible_at is not None
+    assert case.next_eligible_at > case.created_at
+
+
+async def test_a_stranger_who_abandons_a_checkout_is_not_chased(session, fake_client):
+    """The order carries no customer and the payment only a bare email and
+    phone. Manufacturing a customer record for someone we have no relationship
+    with is a consent decision, not a technical one."""
+    await handle_payment_failed(
+        session, payment_failed_event(invoice_id=None), fake_client
+    )
+    await session.commit()
+
+    assert await _cases(session) == []
+    # The payment is still recorded -- detected, just not actionable.
+    assert (await session.execute(select(func.count(Payment.id)))).scalar_one() == 1
+
+
+async def test_paying_the_order_later_closes_the_checkout_case(session, fake_client):
+    """The desirable outcome: they retried on their own inside the grace
+    window and the agent never had to ring."""
+    await _known_customer(session)
+    await handle_payment_failed(
+        session, payment_failed_event(invoice_id=None), fake_client
+    )
+    await session.commit()
+    case = (await _cases(session))[0]
+
+    await handle_order_paid(session, order_paid_event(), fake_client)
+    await session.commit()
+
+    await session.refresh(case)
+    assert case.status == CaseStatus.RECOVERED
+    assert case.recovered_amount == 49900
+    assert ActionType.PAYMENT_CAPTURED in await _actions(session, case.id)
+
+
+async def test_an_order_we_have_no_case_for_is_ignored(session, fake_client):
+    """Most paid orders are ordinary business, not recoveries."""
+    await handle_order_paid(session, order_paid_event(order_id="order_unknown"), fake_client)
+    await session.commit()
+
+    assert await _cases(session) == []
+
+
+async def test_a_replayed_checkout_failure_does_not_open_a_second_case(session, fake_client):
+    await _known_customer(session)
+    for _ in range(2):
+        await handle_payment_failed(
+            session, payment_failed_event(invoice_id=None), fake_client
+        )
+        await session.commit()
+
+    assert len(await _cases(session)) == 1
+
+
+# --- One debt, one case ----------------------------------------------------
+
+
+async def test_a_second_failure_on_one_invoice_does_not_open_a_second_case(session, fake_client):
+    """Every retry against an invoice arrives with a fresh payment id.
+
+    Keying only on that opened four cases for one Rs 499 debt here, each with
+    its own untouched contact budget. A repeat failure is more evidence about a
+    debt we are already chasing.
+    """
+    await handle_payment_failed(session, payment_failed_event(), fake_client)
+    await session.commit()
+    first = (await _cases(session))[0]
+
+    await handle_payment_failed(
+        session, payment_failed_event(payment_id="pay_RETRY_2"), fake_client
+    )
+    await session.commit()
+
+    assert len(await _cases(session)) == 1
+    assert ActionType.REPEAT_FAILURE in await _actions(session, first.id)
+
+
+async def test_the_repeat_records_what_actually_failed(session, fake_client):
+    """The second attempt can fail for a different reason than the first, and
+    the trail has to show that even though no new case opens."""
+    await handle_payment_failed(session, payment_failed_event(), fake_client)
+    await session.commit()
+    case = (await _cases(session))[0]
+
+    await handle_payment_failed(
+        session, payment_failed_event(payment_id="pay_RETRY_3"), fake_client
+    )
+    await session.commit()
+
+    rows = await session.execute(
+        select(RecoveryAction.metadata_json)
+        .where(RecoveryAction.recovery_case_id == case.id)
+        .where(RecoveryAction.action_type == ActionType.REPEAT_FAILURE)
+    )
+    meta = rows.scalar_one()
+    assert meta["razorpay_payment_id"] == "pay_RETRY_3"
+    assert meta["error_reason"] == "insufficient_funds"
+
+
+async def test_a_closed_case_does_not_swallow_a_new_failure(session, fake_client):
+    """Dedupe applies to debts still being chased. Once a case is closed, a
+    fresh failure on that invoice is genuinely new work."""
+    await handle_payment_failed(session, payment_failed_event(), fake_client)
+    await session.commit()
+    case = (await _cases(session))[0]
+    case.status = CaseStatus.RECOVERED
+    await session.commit()
+
+    await handle_payment_failed(
+        session, payment_failed_event(payment_id="pay_AFTER_CLOSE"), fake_client
+    )
+    await session.commit()
+
+    assert len(await _cases(session)) == 2

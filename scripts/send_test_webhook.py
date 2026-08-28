@@ -23,8 +23,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tests.payloads import (  # noqa: E402
+    order_paid_event,
     payment_captured_event,
     payment_failed_event,
+    payment_link_paid_event,
     subscription_charged_event,
     subscription_halted_event,
     subscription_pending_event,
@@ -33,6 +35,8 @@ from tests.payloads import (  # noqa: E402
 BUILDERS = {
     "payment.failed": payment_failed_event,
     "payment.captured": payment_captured_event,
+    "payment_link.paid": payment_link_paid_event,
+    "order.paid": order_paid_event,
     "subscription.pending": subscription_pending_event,
     "subscription.halted": subscription_halted_event,
     "subscription.charged": subscription_charged_event,
@@ -56,6 +60,14 @@ def build_payload(args: argparse.Namespace) -> dict:
     builder = BUILDERS[args.event]
     if args.event in ("payment.failed", "payment.captured"):
         return builder(payment_id=args.payment_id, invoice_id=args.invoice_id or None)
+    if args.event == "payment_link.paid":
+        if not args.reference_id:
+            raise SystemExit(
+                "payment_link.paid needs --reference-id (the recovery-N-M on the link)"
+            )
+        return builder(reference_id=args.reference_id, payment_id=args.payment_id)
+    if args.event == "order.paid":
+        return builder(order_id=args.order_id, payment_id=args.payment_id)
     if args.event == "subscription.charged":
         return builder(payment_id=args.payment_id, subscription_id=args.subscription_id)
     return builder(subscription_id=args.subscription_id)
@@ -69,6 +81,8 @@ def main() -> None:
     parser.add_argument("--payment-id", default="pay_LOCAL1")
     parser.add_argument("--subscription-id", default="sub_1")
     parser.add_argument("--invoice-id", default="inv_1", help='pass "" for a one-off payment')
+    parser.add_argument("--reference-id", help="for payment_link.paid: recovery-{case}-{attempt}")
+    parser.add_argument("--order-id", default="order_1", help="for order.paid")
     parser.add_argument("--tamper", action="store_true", help="send a bad signature")
     args = parser.parse_args()
 
