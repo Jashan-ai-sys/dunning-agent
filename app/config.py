@@ -28,9 +28,45 @@ class Settings(BaseSettings):
     contact_window_end_hour: int = 21
     contact_timezone: str = "Asia/Kolkata"
 
+    # How long after a failed checkout payment we wait before chasing it. A
+    # customer who simply retries with another card two minutes later has not
+    # abandoned anything, and contacting them mid-purchase would be absurd.
+    checkout_grace_minutes: int = 30
+
+    # How many times a webhook envelope is retried before it is dead-lettered.
+    # A retry that can never succeed is not resilience, it is a queue jam.
+    webhook_max_attempts: int = 5
+    # How many consecutive delivery failures a case tolerates before it is
+    # closed as undeliverable. Distinct from max_attempts, which counts
+    # contacts the customer actually received.
+    max_delivery_failures: int = 5
+
+    # Re-charge a still-valid mandate instead of sending a link, when the only
+    # thing that went wrong was that the money was not there. Off by default:
+    # it is the one path that takes money without the customer doing anything,
+    # so a deployment should turn it on deliberately rather than inherit it.
+    mandate_retry_enabled: bool = False
+
+    # Minimum gap between contacting the same *person*, whatever the debt.
+    # Distinct from retry_backoff_hours, which bounds one case: a customer with
+    # three failed charges should still hear from us once, not three times.
+    customer_contact_cooldown_hours: int = 24
+
+    # How long we defer to Razorpay's own retry sequence before working a
+    # bank-side failure ourselves. Deliberately a clock and not a webhook: the
+    # `subscription.halted` event is the *ideal* signal, but a case that never
+    # receives one -- cancelled instead of halted, event not subscribed,
+    # delivery lost past the replay window -- must still eventually be worked
+    # rather than waiting forever.
+    bank_retry_grace_hours: int = 72
+
     # Payment links expire so a stale link cannot be paid weeks later against
     # a case that has since been closed. Razorpay requires at least 15 minutes.
     payment_link_expiry_hours: int = 48
+    # How long a customer who says "yes, I will pay" has before that promise
+    # counts as broken. Tracks the link's own lifetime: a promise cannot
+    # outlive the instrument it was made against.
+    promise_window_hours: int = 48
 
     worker_interval_seconds: int = 60
     worker_batch_size: int = 50

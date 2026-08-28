@@ -12,8 +12,9 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants import ActionType, CaseStatus
+from app.constants import ActionType, CaseSource, CaseStatus
 from app.models import Customer, Payment, RecoveryAction, RecoveryCase, Subscription
+from app.priority import tier_from
 
 
 def utcnow() -> datetime:
@@ -69,6 +70,7 @@ async def upsert_payment(
     values = {
         "razorpay_payment_id": entity["id"],
         "razorpay_invoice_id": entity.get("invoice_id"),
+        "razorpay_order_id": entity.get("order_id"),
         "razorpay_subscription_id": subscription_id,
         "razorpay_customer_id": customer_id,
         "amount": entity.get("amount", 0),
@@ -104,12 +106,38 @@ async def get_open_cases_for_subscription(
     return list(result.scalars())
 
 
+async def get_open_case_for_invoice(
+    session: AsyncSession, invoice_id: str
+) -> RecoveryCase | None:
+    """An unfinished case already chasing this invoice, if there is one.
+
+    Cases are keyed on ``razorpay_payment_id``, which is right for idempotency
+    -- the same webhook delivered twice must not open two cases. It is wrong
+    for *debt* identity: every retry against one invoice is a new payment id,
+    so a subscription that fails authorisation four times opens four cases for
+    one Rs 499 debt, each with its own untouched contact budget.
+
+    The invoice is the debt. This is how a repeat failure finds it.
+    """
+    result = await session.execute(
+        select(RecoveryCase)
+        .where(RecoveryCase.razorpay_invoice_id == invoice_id)
+        .where(RecoveryCase.status.in_([CaseStatus.OPEN, CaseStatus.IN_PROGRESS]))
+        .order_by(RecoveryCase.created_at)
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 async def open_recovery_case(
     session: AsyncSession,
     *,
     payment: dict[str, Any],
     subscription_id: str | None,
     customer_id: str | None,
+    source: str = CaseSource.RAZORPAY,
+    priority_tier: int | None = None,
+    next_eligible_at: datetime | None = None,
 ) -> RecoveryCase | None:
     """Open a case for a failed charge. Returns None if one already exists.
 
@@ -129,7 +157,20 @@ async def open_recovery_case(
             currency=payment.get("currency", "INR"),
             failure_code=payment.get("error_code"),
             failure_reason=payment.get("error_description") or payment.get("error_reason"),
+            failure_source=payment.get("error_source"),
+            failure_reason_code=payment.get("error_reason"),
+            failure_step=payment.get("error_step"),
+            razorpay_order_id=payment.get("order_id"),
+            priority_tier=priority_tier
+            if priority_tier is not None
+            else tier_from(
+                payment.get("error_source"),
+                payment.get("error_reason"),
+                payment.get("error_step"),
+            ),
             status=CaseStatus.OPEN,
+            source=source,
+            next_eligible_at=next_eligible_at,
         )
         .on_conflict_do_nothing(index_elements=[RecoveryCase.razorpay_payment_id])
         .returning(RecoveryCase.id)
