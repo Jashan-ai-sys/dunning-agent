@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.db import get_session
+from app.events import announce_event
 from app.razorpay.signature import verify_webhook_signature
 from app.webhooks.processor import process_event, record_event
 
@@ -53,5 +54,11 @@ async def razorpay_webhook(
     if event is None:
         return {"status": "duplicate"}
 
+    # Announce it, then keep the in-process fallback. Three paths now lead to
+    # the same envelope -- push, this background task, and the cron sweep --
+    # and all three are safe because process_event returns early once
+    # processed_at is set. Belt and braces is the right posture for the only
+    # notification Razorpay will ever send us about money.
+    await announce_event(event.id, event_name)
     background.add_task(process_event, event.id)
     return {"status": "accepted"}

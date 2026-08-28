@@ -29,6 +29,19 @@ class Settings(BaseSettings):
     # plausible redelivery window; the unique constraint covers forever.
     redis_event_ttl_seconds: int = 86_400
 
+    # Push delivery for webhook events. Empty means cron-only, which is the
+    # default and how this service has always worked -- the sweep finds
+    # every envelope either way, just up to five minutes later.
+    # Full resource name: projects/PROJECT/topics/TOPIC
+    pubsub_topic: str = ""
+    pubsub_publish_timeout_seconds: float = 5.0
+    # Service account Pub/Sub signs its push requests as. Empty disables
+    # the push endpoint outright: an unverified endpoint that dispatches
+    # handlers is not something to leave open by default.
+    pubsub_push_service_account: str = ""
+    # The audience the OIDC token must carry -- normally this service URL.
+    pubsub_push_audience: str = ""
+
     # --- Recovery policy ---
     # Below this, a voice call costs more than the debt is worth.
     min_recoverable_amount_paise: int = 5_000  # Rs 50

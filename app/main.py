@@ -5,6 +5,7 @@ from sqlalchemy import text
 
 from app.config import get_settings
 from app.db import engine
+from app.webhooks.pubsub_router import router as pubsub_router
 from app.webhooks.router import router as webhooks_router
 from app.webhooks.twilio_router import router as twilio_router
 
@@ -16,6 +17,7 @@ logging.basicConfig(
 app = FastAPI(title="Dunning Agent", version="0.1.0")
 app.include_router(webhooks_router)
 app.include_router(twilio_router)
+app.include_router(pubsub_router)
 
 
 @app.get("/health")

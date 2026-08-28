@@ -17,6 +17,10 @@ dependencies = [
     # is unset, so the dependency is here rather than the code being
     # conditional on the import.
     "redis>=5.0",
+    # Optional at runtime, like redis: with no topic configured the publisher
+    # is a no-op and the cron sweep remains the only path, which is exactly
+    # how this service worked before push delivery existed.
+    "google-cloud-pubsub>=2.23",
 ]
 
 [dependency-groups]
@@ -65,3 +69,4 @@ select = ["E", "F", "I", "UP", "B"]
 # FastAPI's Depends()/Header() in argument defaults is the framework's idiom.
 "app/webhooks/router.py" = ["B008"]
 "app/webhooks/twilio_router.py" = ["B008"]
+"app/webhooks/pubsub_router.py" = ["B008"]
