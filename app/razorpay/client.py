@@ -47,6 +47,40 @@ class RazorpayClient:
         ``id`` and ``short_url``."""
         return await self._post("/payment_links", payload)
 
+    async def notify_payment_link(self, link_id: str, medium: str) -> dict[str, Any]:
+        """Re-send an existing payment link over ``sms`` or ``email``.
+
+        Razorpay delivers the link once, when it is created. A customer who is
+        called a second time about the same debt therefore hears the agent say
+        it is sending a link and receives nothing -- the case already has one,
+        so nothing is created and nothing is sent. This is how you deliver the
+        link you already made without minting a second one.
+        """
+        return await self._post(f"/payment_links/{link_id}/notify_by/{medium}", {})
+
+    async def fetch_customer_tokens(self, customer_id: str) -> dict[str, Any]:
+        """Every saved instrument for a customer, including e-mandates.
+
+        This is how a mandate retry finds something to charge without us
+        storing card or bank data ourselves: Razorpay holds the token, we only
+        ever hold its id, and even that is fetched fresh rather than cached.
+        """
+        return await self._get(f"/customers/{customer_id}/tokens")
+
+    async def create_order(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """A recurring charge cannot be made against nothing -- Razorpay wants
+        an order to hang it on, created immediately before the charge."""
+        return await self._post("/orders", payload)
+
+    async def create_recurring_payment(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Charge an existing mandate.
+
+        The only call in this client that moves money without the customer
+        touching anything, which is why nothing reaches it except through
+        app.mandate and an explicitly enabled setting.
+        """
+        return await self._post("/payments/create/recurring", payload)
+
     async def fetch_invoice(self, invoice_id: str) -> dict[str, Any]:
         """Invoices carry the subscription_id and customer_id a payment lacks."""
         return await self._get(f"/invoices/{invoice_id}")

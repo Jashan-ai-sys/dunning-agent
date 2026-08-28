@@ -1,7 +1,7 @@
 """Payment links: the recovery instrument, and how a payment gets attributed."""
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app.config import Settings
 from app.constants import ActionType, CaseStatus
@@ -21,9 +21,11 @@ SETTINGS = Settings(company_name="Acme", payment_link_expiry_hours=48)
 class FakeLinkClient:
     """Records what would have been sent to Razorpay."""
 
-    def __init__(self, link_id: str = "plink_1") -> None:
+    def __init__(self, link_id: str = "plink_1", notify_fails: bool = False) -> None:
         self.link_id = link_id
         self.payloads: list[dict] = []
+        self.notified: list[tuple[str, str]] = []
+        self.notify_fails = notify_fails
 
     async def create_payment_link(self, payload: dict) -> dict:
         self.payloads.append(payload)
@@ -33,6 +35,12 @@ class FakeLinkClient:
             "reference_id": payload["reference_id"],
             "status": "created",
         }
+
+    async def notify_payment_link(self, link_id: str, medium: str) -> dict:
+        if self.notify_fails:
+            raise RuntimeError("razorpay is having a day")
+        self.notified.append((link_id, medium))
+        return {"success": True}
 
 
 async def seed(session, **case_kwargs) -> tuple[RecoveryCase, Customer]:
@@ -147,8 +155,68 @@ async def test_a_second_request_reuses_the_existing_link(session):
 
     assert first.id == second.id
     assert len(client.payloads) == 1
-    count = await session.execute(select(func.count(RecoveryAction.id)))
-    assert count.scalar_one() == 1
+
+    # One row per call, but only the first one actually created anything. The
+    # second is a resend -- the orchestrator burns an attempt on the strength
+    # of that row, so it must exist and must not claim a link was created.
+    rows = await session.execute(
+        select(RecoveryAction.metadata_json).order_by(RecoveryAction.id)
+    )
+    created, resent = list(rows.scalars())
+    assert created.get("created") is not False
+    assert resent["created"] is False
+    assert resent["resent_via"] == ["sms", "email"]
+
+
+async def test_reusing_a_link_still_delivers_it(session):
+    """Razorpay notifies once, at creation.
+
+    Without a resend, a customer called a second time hears the agent say it is
+    sending a link and receives nothing -- which is what happened on a real
+    call. A second *link* would risk charging them twice; a second SMS only
+    repeats what they just asked to be told.
+    """
+    case, customer = await seed(session)
+    client = FakeLinkClient()
+
+    await create_recovery_link(session, case, customer, client, settings=SETTINGS)
+    await session.commit()
+    assert client.notified == []  # creation notifies on its own
+
+    await create_recovery_link(session, case, customer, client, settings=SETTINGS)
+    await session.commit()
+
+    assert client.notified == [("plink_1", "sms"), ("plink_1", "email")]
+
+
+async def test_a_resend_is_attempted_only_where_we_can_reach_them(session):
+    case, customer = await seed(session)
+    customer.email = None
+    await session.commit()
+    client = FakeLinkClient()
+
+    await create_recovery_link(session, case, customer, client, settings=SETTINGS)
+    await session.commit()
+    await create_recovery_link(session, case, customer, client, settings=SETTINGS)
+    await session.commit()
+
+    assert client.notified == [("plink_1", "sms")]
+
+
+async def test_a_failed_resend_does_not_break_the_call(session):
+    """They still have the first message, and the agent reads the URL aloud."""
+    case, customer = await seed(session)
+    client = FakeLinkClient()
+
+    await create_recovery_link(session, case, customer, client, settings=SETTINGS)
+    await session.commit()
+
+    client.notify_fails = True
+    link = await create_recovery_link(session, case, customer, client, settings=SETTINGS)
+    await session.commit()
+
+    assert link is not None
+    assert link.id == "plink_1"
 
 
 async def test_link_creation_does_not_close_the_case(session):
@@ -274,3 +342,24 @@ def test_links_written_before_the_suffix_still_attribute():
     assert case_id_from_reference("recovery-1") == 1
     assert case_id_from_reference("recovery-1-0") == 1
     assert case_id_from_reference("recovery-42-7") == 42
+
+
+async def test_a_resend_that_reached_nobody_says_so_in_the_trail(session):
+    """An audit entry claiming a link was resent when nothing left the building
+    is worse than no entry: the orchestrator burns an attempt on it, and
+    reconciliation later would be reading a lie."""
+    case, customer = await seed(session)
+    client = FakeLinkClient()
+
+    await create_recovery_link(session, case, customer, client, settings=SETTINGS)
+    await session.commit()
+
+    client.notify_fails = True
+    await create_recovery_link(session, case, customer, client, settings=SETTINGS)
+    await session.commit()
+
+    rows = await session.execute(
+        select(RecoveryAction.metadata_json).order_by(RecoveryAction.id)
+    )
+    _, resent = list(rows.scalars())
+    assert resent["resent_via"] == []

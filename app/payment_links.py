@@ -17,7 +17,7 @@ silently lose a recovery from the batch metrics.
 
 import logging
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -102,6 +102,37 @@ def build_payload(
     return payload
 
 
+async def _notify_existing_link(
+    case: RecoveryCase, customer: Customer, client: RazorpayClient
+) -> list[str]:
+    """Re-send a link the case already has, over whatever we can reach.
+
+    Never raises. A failed re-notification is not a reason to break a call that
+    is otherwise going well: the customer still has the original message and
+    the agent reads the URL out loud anyway.
+
+    Returns the media it actually reached them on, which may be empty. The
+    caller writes that into the audit trail rather than assuming success -- an
+    entry claiming a link was resent when nothing left the building is worse
+    than no entry at all.
+    """
+    delivered: list[str] = []
+    media = [("sms", customer.phone), ("email", customer.email)]
+    for medium, contact in media:
+        if not contact:
+            continue
+        try:
+            await client.notify_payment_link(case.payment_link_id, medium)
+        except Exception:  # noqa: BLE001 - never break a call over a resend
+            logger.exception(
+                "could not re-send payment link %s by %s", case.payment_link_id, medium
+            )
+        else:
+            logger.info("re-sent payment link %s by %s", case.payment_link_id, medium)
+            delivered.append(medium)
+    return delivered
+
+
 async def create_recovery_link(
     session: AsyncSession,
     case: RecoveryCase,
@@ -109,7 +140,8 @@ async def create_recovery_link(
     client: RazorpayClient,
     *,
     settings: Settings | None = None,
-) -> PaymentLink | None:
+    now: datetime | None = None,
+) -> PaymentLink:
     """Create and record a payment link for a case.
 
     Returns the existing link untouched if one has already been sent: a customer
@@ -117,9 +149,32 @@ async def create_recovery_link(
     debt, which would risk charging them twice.
     """
     settings = settings or get_settings()
+    now = now or utcnow()
 
     if case.payment_link_id and case.payment_link_url:
         logger.info("case %s already has payment link %s", case.id, case.payment_link_id)
+        # Deliver it again. Razorpay notifies once, at creation, so without this
+        # a customer called a second time hears the agent say it is sending a
+        # link and receives nothing. Re-notifying is the right half to repeat:
+        # a second *link* would risk charging them twice, a second SMS only
+        # tells them again what they just asked to be told.
+        resent_via = await _notify_existing_link(case, customer, client)
+        # Log the resend. Callers count on every return from here leaving an
+        # audit row -- the orchestrator burns an attempt on the strength of it,
+        # and an attempt with nothing beside it in the trail is unexplainable.
+        # ``resent_via`` is what actually went out, empty list included: the
+        # trail has to be able to show an attempt that reached nobody.
+        await log_action(
+            session,
+            case,
+            ActionType.PAYMENT_LINK_CREATED,
+            {
+                "payment_link_id": case.payment_link_id,
+                "short_url": case.payment_link_url,
+                "created": False,
+                "resent_via": resent_via,
+            },
+        )
         return PaymentLink(
             id=case.payment_link_id,
             short_url=case.payment_link_url,
@@ -127,7 +182,7 @@ async def create_recovery_link(
         )
 
     expire_at = int(
-        (utcnow() + timedelta(hours=settings.payment_link_expiry_hours)).timestamp()
+        (now + timedelta(hours=settings.payment_link_expiry_hours)).timestamp()
     )
     payload = build_payload(case, customer, settings=settings, expire_at=expire_at)
     entity = await client.create_payment_link(payload)
@@ -139,7 +194,7 @@ async def create_recovery_link(
     )
     case.payment_link_id = link.id
     case.payment_link_url = link.short_url
-    case.payment_link_sent_at = utcnow()
+    case.payment_link_sent_at = now
 
     await log_action(
         session,
