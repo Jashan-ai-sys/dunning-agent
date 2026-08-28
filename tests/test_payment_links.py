@@ -363,3 +363,50 @@ async def test_a_resend_that_reached_nobody_says_so_in_the_trail(session):
     )
     _, resent = list(rows.scalars())
     assert resent["resent_via"] == []
+
+
+# --- Reference namespace ---------------------------------------------------
+
+
+def _case(case_id=7, attempt=0):
+    return RecoveryCase(id=case_id, razorpay_payment_id="pay_x", original_amount=49_900,
+                        attempt_count=attempt)
+
+
+def test_without_a_namespace_the_reference_is_unchanged():
+    """Links already out in the world must keep reconciling."""
+    s = Settings(payment_reference_namespace="")
+    assert reference_id_for(_case(), settings=s) == "recovery-7-0"
+
+
+def test_the_namespace_is_appended_not_prepended():
+    """The case id has to stay the first segment or old references stop
+    parsing."""
+    s = Settings(payment_reference_namespace="aug29")
+    assert reference_id_for(_case(), settings=s) == "recovery-7-0-aug29"
+
+
+def test_a_namespaced_reference_still_parses_back_to_its_case():
+    s = Settings(payment_reference_namespace="aug29")
+    assert case_id_from_reference(reference_id_for(_case(41), settings=s)) == 41
+
+
+def test_two_deployments_reusing_case_id_1_do_not_collide():
+    """The 400 this exists for: case ids restart at 1 on a fresh database, and
+    Razorpay holds reference_ids account-wide and forever."""
+    old = reference_id_for(_case(1), settings=Settings(payment_reference_namespace="jul"))
+    new = reference_id_for(_case(1), settings=Settings(payment_reference_namespace="aug"))
+    assert old != new
+    assert case_id_from_reference(old) == case_id_from_reference(new) == 1
+
+
+def test_a_long_namespace_cannot_push_the_reference_past_razorpays_cap():
+    s = Settings(payment_reference_namespace="x" * 80)
+    ref = reference_id_for(_case(123456), settings=s)
+    assert len(ref) <= 40
+    assert case_id_from_reference(ref) == 123456, "the case id must survive truncation"
+
+
+def test_whitespace_only_namespace_is_treated_as_unset():
+    s = Settings(payment_reference_namespace="   ")
+    assert reference_id_for(_case(), settings=s) == "recovery-7-0"

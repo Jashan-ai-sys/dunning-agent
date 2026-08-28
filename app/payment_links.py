@@ -31,6 +31,9 @@ logger = logging.getLogger(__name__)
 
 REFERENCE_PREFIX = "recovery-"
 
+#: Razorpay rejects a reference_id longer than this.
+MAX_REFERENCE_CHARS = 40
+
 
 @dataclass(frozen=True)
 class PaymentLink:
@@ -39,24 +42,37 @@ class PaymentLink:
     reference_id: str
 
 
-def reference_id_for(case: RecoveryCase) -> str:
-    """Razorpay caps reference_id at 40 characters; this is well inside it.
+def reference_id_for(case: RecoveryCase, *, settings: Settings | None = None) -> str:
+    """The attribution key we put on every payment link.
 
-    Carries the attempt as well as the case, because Razorpay enforces
-    uniqueness on this field across the whole account and forever. Keyed on the
-    case alone, the second link a case ever needs is rejected outright:
+    Razorpay enforces uniqueness on reference_id across the whole account, and
+    forever. Two things follow from that, and both are real 400s we have hit.
 
-        400 payment link with given reference_id: recovery-1 already exists
+    Keyed on the case alone, the second link a case ever needs is rejected:
 
-    which is a real 400 we hit -- the account still held ``recovery-1`` from an
-    earlier database whose case ids started at 1 too. One Razorpay account
-    outlives any one deployment of this, so the reference has to be unique per
-    attempt rather than per row.
+        payment link with given reference_id: recovery-1 already exists
+
+    hence the attempt suffix. And case ids restart at 1 on a fresh database, so
+    a redeploy against a new instance collides with links the account has held
+    since the last one -- hence the namespace, which is empty by default and
+    reproduces the old format exactly.
+
+    The namespace goes on the *end* deliberately: the case id stays the first
+    segment, so every reference ever issued, with or without one, still parses
+    back to its case.
     """
+    settings = settings or get_settings()
     # `or 0` rather than the raw value: a case built in memory and not yet
     # flushed has attempt_count None, and "recovery-7-None" would be sent to
     # Razorpay as a real, permanently-reserved reference.
-    return f"{REFERENCE_PREFIX}{case.id}-{case.attempt_count or 0}"
+    reference = f"{REFERENCE_PREFIX}{case.id}-{case.attempt_count or 0}"
+
+    namespace = settings.payment_reference_namespace.strip()
+    if namespace:
+        reference = f"{reference}-{namespace}"
+    # Truncating from the end costs the namespace; truncating from the front
+    # would cost the case id, which is the one part that must survive.
+    return reference[:MAX_REFERENCE_CHARS]
 
 
 def case_id_from_reference(reference_id: str | None) -> int | None:

@@ -60,6 +60,18 @@ class Settings(BaseSettings):
     # rather than waiting forever.
     bank_retry_grace_hours: int = 72
 
+    # Appended to every payment link reference_id. Razorpay enforces
+    # reference_id uniqueness across the whole account, forever -- and case ids
+    # restart at 1 on a fresh database, so a redeploy against a new Cloud SQL
+    # instance collides with links the account has held since the last one.
+    # That is a real 400 we hit: "payment link with given reference_id:
+    # recovery-1-0 already exists".
+    #
+    # Empty by default, which reproduces the old format exactly so links
+    # already out in the world keep reconciling. Set it to anything short and
+    # distinct per deployment -- a date, an environment name, a random suffix.
+    payment_reference_namespace: str = ""
+
     # Payment links expire so a stale link cannot be paid weeks later against
     # a case that has since been closed. Razorpay requires at least 15 minutes.
     payment_link_expiry_hours: int = 48
