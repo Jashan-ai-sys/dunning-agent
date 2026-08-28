@@ -152,6 +152,9 @@ class GraphWalker:
             "When, and only when, the customer's position is clear, call the "
             "`transition` tool with the matching label. Do not guess: if it is "
             "still ambiguous, ask one short clarifying question instead.\n\n"
+            "Say your reply in the SAME response as the tool call -- speak "
+            "first, then call the tool. A tool call on its own is silence on "
+            "the line while you are asked again, and the customer is waiting.\n\n"
             f"Available labels:\n{menu}"
         )
 

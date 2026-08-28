@@ -60,3 +60,4 @@ select = ["E", "F", "I", "UP", "B"]
 "alembic/versions/*.py" = ["E501"]
 # FastAPI's Depends()/Header() in argument defaults is the framework's idiom.
 "app/webhooks/router.py" = ["B008"]
+"app/webhooks/twilio_router.py" = ["B008"]

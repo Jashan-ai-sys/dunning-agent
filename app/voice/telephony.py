@@ -69,11 +69,18 @@ class TwilioChannel:
         self._settings = settings
 
     @property
-    def _calls_url(self) -> str:
+    def _account_url(self) -> str:
         return (
             f"{self._settings.twilio_api_base}/Accounts/"
-            f"{self._settings.twilio_account_sid}/Calls.json"
+            f"{self._settings.twilio_account_sid}"
         )
+
+    @property
+    def _calls_url(self) -> str:
+        return f"{self._account_url}/Calls.json"
+
+    def _call_url(self, call_sid: str) -> str:
+        return f"{self._account_url}/Calls/{call_sid}.json"
 
     def _body(self, case: RecoveryCase, customer: Customer) -> dict[str, Any]:
         return call_body(case, customer, company_name=self._settings.company_name)
@@ -108,6 +115,44 @@ class TwilioChannel:
             )
         return markup
 
+    def _machine_detection(self) -> dict[str, str]:
+        """Ask Twilio to tell us whether a person or a recording answered.
+
+        Both settings must be present. Detection with nowhere to deliver the
+        verdict changes nothing about the call and only costs Twilio's AMD fee,
+        so an empty callback URL disables it rather than half-enabling it.
+
+        ``DetectMessageEnd`` rather than ``Enable``: on a voicemail we want the
+        beep, because the difference between "a machine answered" and "the
+        greeting has finished" is the difference between hanging up and leaving
+        one. We only do the former today, but the verdict is strictly more
+        informative and costs nothing extra.
+        """
+        settings = self._settings
+        if not (settings.machine_detection_enabled and settings.twilio_amd_callback_url):
+            return {}
+        return {
+            "MachineDetection": "DetectMessageEnd",
+            # Asynchronous: the media stream connects straight away and the
+            # verdict follows. Synchronous AMD holds the call while Twilio
+            # listens, which a human who answered hears as dead air.
+            "AsyncAmd": "true",
+            "AsyncAmdStatusCallback": settings.twilio_amd_callback_url,
+            "AsyncAmdStatusCallbackMethod": "POST",
+            "MachineDetectionTimeout": str(settings.machine_detection_timeout),
+        }
+
+    async def hang_up(self, call_sid: str) -> None:
+        """End a call in progress. Used when a recording answered."""
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                self._call_url(call_sid),
+                data={"Status": "completed"},
+                auth=(self._settings.twilio_account_sid, self._settings.twilio_auth_token),
+            )
+        response.raise_for_status()
+        logger.info("hung up %s", call_sid)
+
     async def initiate(self, case: RecoveryCase, customer: Customer) -> ContactResult:
         if not customer.phone:
             raise RuntimeError(f"customer {customer.razorpay_customer_id} has no phone number")
@@ -119,6 +164,7 @@ class TwilioChannel:
             "Twiml": self.twiml(body),
             "Timeout": str(RING_TIMEOUT_SECONDS),
         }
+        payload.update(self._machine_detection())
 
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
             response = await client.post(

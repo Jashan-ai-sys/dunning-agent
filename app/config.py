@@ -132,6 +132,20 @@ class Settings(BaseSettings):
     # its own network, so localhost is never reachable.
     twilio_stream_url: str = ""
     twilio_api_base: str = "https://api.twilio.com/2010-04-01"
+    # Answering machine detection. Without it a voicemail greeting answers,
+    # the agent talks to a recording, and the attempt is spent -- three of
+    # those and the case closes as max_attempts_reached having never reached
+    # a person.
+    #
+    # Asynchronous on purpose: synchronous AMD holds the call while Twilio
+    # listens, which is several seconds of silence for a human who did answer.
+    # Async connects immediately and tells us afterwards.
+    machine_detection_enabled: bool = True
+    # Seconds Twilio may spend deciding. Its own range is 3-59.
+    machine_detection_timeout: int = 30
+    # Public URL Twilio posts the verdict to. Empty disables AMD regardless of
+    # the flag above -- detection nobody can hear the result of is pointless.
+    twilio_amd_callback_url: str = ""
     # Name the agent introduces itself with.
     company_name: str = "Acme"
     # Sarvam / Gemini / Cartesia keys are read from the environment by their

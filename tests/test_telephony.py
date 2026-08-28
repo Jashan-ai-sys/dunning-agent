@@ -209,3 +209,41 @@ def test_the_provider_recorded_is_the_one_that_carried_the_call():
     assert telephony_provider(FakeRunnerArgs(transport_type="plivo")) == "plivo"
     # Unknown beats claiming LiveKit carried a call it did not.
     assert telephony_provider(FakeRunnerArgs()) == "pipecat"
+
+
+# --- Answering machine detection -------------------------------------------
+
+
+def test_amd_is_requested_when_a_callback_url_is_configured():
+    channel = TwilioChannel()
+    channel._settings = Settings(
+        twilio_account_sid="AC1", twilio_auth_token="t", twilio_from_number="+1",
+        twilio_stream_url="wss://x/ws", machine_detection_enabled=True,
+        twilio_amd_callback_url="https://example.invalid/webhooks/twilio/amd",
+    )
+    amd = channel._machine_detection()
+    assert amd["MachineDetection"] == "DetectMessageEnd"
+    assert amd["AsyncAmd"] == "true", "sync AMD is dead air for a human who answered"
+    assert amd["AsyncAmdStatusCallback"] == "https://example.invalid/webhooks/twilio/amd"
+
+
+def test_amd_is_off_without_a_callback_url():
+    """Detection with nowhere to deliver the verdict changes nothing about the
+    call and only costs Twilio's AMD fee."""
+    channel = TwilioChannel()
+    channel._settings = Settings(
+        twilio_account_sid="AC1", twilio_auth_token="t", twilio_from_number="+1",
+        twilio_stream_url="wss://x/ws", machine_detection_enabled=True,
+        twilio_amd_callback_url="",
+    )
+    assert channel._machine_detection() == {}
+
+
+def test_amd_can_be_switched_off_outright():
+    channel = TwilioChannel()
+    channel._settings = Settings(
+        twilio_account_sid="AC1", twilio_auth_token="t", twilio_from_number="+1",
+        twilio_stream_url="wss://x/ws", machine_detection_enabled=False,
+        twilio_amd_callback_url="https://example.invalid/amd",
+    )
+    assert channel._machine_detection() == {}

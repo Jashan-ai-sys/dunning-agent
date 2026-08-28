@@ -303,3 +303,31 @@ def test_reason_inquiry_asks_once_and_listens():
     text = w.instructions()
     assert "one question" in text
     assert "do not ask twice" in text
+
+
+def test_the_stage_prompt_asks_for_speech_and_the_tool_call_together():
+    """The batching optimisation is only worth anything if the model is asked
+    for it. A tool call with no speech costs a second Vertex round trip --
+    measured at +0.565s (1.87x) on turns that transitioned."""
+    walker = GraphWalker(DUNNING_FLOW, CONTEXT)
+    prompt = walker.stage_instructions()
+    assert "SAME response as the tool call" in prompt
+    assert "silence on the line" in prompt
+    # It must still be a constrained choice, not free rein.
+    assert "Available labels:" in prompt
+
+
+def test_a_terminal_stage_asks_for_no_transition_at_all():
+    """Nothing left to batch once the call is over."""
+    walker = GraphWalker(DUNNING_FLOW, CONTEXT)
+    for label in ("identity_confirmed", "not_the_customer"):
+        try:
+            walker.transition(label, utterance="x")
+        except Exception:
+            continue
+        break
+    while not walker.finished and walker.node.edges:
+        walker.transition(walker.node.edges[0].label, utterance="x")
+    prompt = walker.stage_instructions()
+    assert "SAME response as the tool call" not in prompt
+    assert "end of the call" in prompt

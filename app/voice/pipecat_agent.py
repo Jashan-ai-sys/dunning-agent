@@ -31,7 +31,7 @@ from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import EndFrame, LLMRunFrame
+from pipecat.frames.frames import EndFrame, FunctionCallResultProperties, LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -530,16 +530,59 @@ class DunningSession:
         # of this returned {"moved_to", "instructions"} -- which the model read
         # as information and then went back to whatever the system prompt last
         # told it to do, re-greeting the customer on every turn.
+        # Only ask the model again if it has not already spoken.
+        #
+        # A transition is a tool call that produces no audio, so by default the
+        # model has to be run a second time before the customer hears anything
+        # -- two Vertex round trips for one turn, measured at +0.565s (1.87x)
+        # against turns that did not transition.
+        #
+        # The prompt asks it to answer *and* transition in the same response.
+        # When it complies there is nothing left to generate, so suppressing
+        # the follow-up costs a round trip and changes nothing the caller
+        # hears. When it does not comply, the follow-up is the only thing
+        # standing between the customer and silence, so this checks rather than
+        # assumes: batching is an optimisation, not a promise the model keeps.
+        spoke = self._model_spoke_this_turn()
         await params.result_callback(
             {
                 "previous_stage": "finished -- do not repeat it",
                 "now_at_stage": self.walker.node.id,
                 "do_this_now": self.walker.stage_instructions(),
-            }
+            },
+            properties=FunctionCallResultProperties(run_llm=not spoke),
+        )
+        logger.info(
+            "transition batched=%s (model %s alongside the tool call)",
+            spoke, "spoke" if spoke else "stayed silent",
         )
 
         if self.walker.finished:
             self.finished.set()
+
+    def _model_spoke_this_turn(self) -> bool:
+        """Did the model produce speech in the same response as the tool call?
+
+        Reads the context rather than trusting the prompt. The assistant's
+        latest message carries the tool call; if it also carries non-empty
+        text, the customer is already being spoken to and running the LLM
+        again would only add a second sentence they did not need.
+        """
+        for message in reversed(self.llm_context.get_messages()):
+            if message.get("role") != "assistant":
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                return bool(content.strip())
+            if isinstance(content, list):
+                return any(
+                    isinstance(part, dict)
+                    and part.get("type") == "text"
+                    and str(part.get("text", "")).strip()
+                    for part in content
+                )
+            return False
+        return False
 
     def _stage_message(self) -> dict:
         """The opening stage, as the first turn of the conversation.
