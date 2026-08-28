@@ -1,0 +1,14 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - Dockerfile.voice
+      - -t
+      - asia-south1-docker.pkg.dev/dunning-agent/cloud-run-source-deploy/dunning-voice:v3
+      - .
+images:
+  - asia-south1-docker.pkg.dev/dunning-agent/cloud-run-source-deploy/dunning-voice:v3
+options:
+  machineType: E2_HIGHCPU_8
+timeout: 1800s

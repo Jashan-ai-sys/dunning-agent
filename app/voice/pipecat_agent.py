@@ -321,6 +321,18 @@ def build_services(language: str, system_instruction: str | None = None) -> tupl
             # timer instead of the transcript that was ready. Off, the flush
             # fires on our VAD's stop and the transcript lands immediately.
             vad_signals=False,
+            # Independent of `vad_signals`, and worth having on a phone leg.
+            #
+            # Pipecat sends this as its own connection parameter whether or not
+            # VAD signals are enabled, so it tunes how readily Sarvam's own
+            # segmenter hears speech without handing it the turn. That is the
+            # half we want: narrowband carrier audio carries 0.05-0.86% of its
+            # energy above 4 kHz, which is why VADs under-trigger on the
+            # customer channel while firing happily on our own TTS.
+            #
+            # Supported on saaras:v3, which is what resolve_sarvam_model()
+            # actually returns here -- v4 is rejected by Pipecat 1.7.0.
+            high_vad_sensitivity=True,
         ),
         mode="transcribe",
     )
@@ -364,7 +376,12 @@ def build_vad() -> SileroVADAnalyzer:
             # STT wait window and delays turns. The LiveKit path keeps 0.3,
             # where the parameter still has its old meaning.
             stop_secs=0.2,
-            start_secs=0.4,
+            # 0.4 was Blostem's value, held high to suppress false barge-ins
+            # after they reverted an 0.2 experiment. 0.3 splits that
+            # difference: barge-in engages a tenth of a second sooner, without
+            # returning to the value they found too eager. If the agent starts
+            # being cut off by line noise or a cough, this is the knob.
+            start_secs=0.3,
             min_volume=0.6,
         )
     )
@@ -390,9 +407,22 @@ def build_turn_strategies() -> UserTurnStrategies:
     single word starts the turn. That is exactly the behaviour this call needs,
     because Hindi speakers backchannel constantly ("हाँ", "जी", "अच्छा") and
     every one of those would otherwise cut the agent off mid-sentence.
+
+    `use_interim` is off, and deliberately so rather than by oversight. It asks
+    the strategy to count words as partial transcripts stream in, which is what
+    would let a real barge-in cut the agent off two words into an interruption.
+    We do not get partials: `mode="transcribe"` with `vad_signals=False` yields
+    one final transcript per turn, and production logs confirm every trigger
+    arrives with `interim_transcription=False`. Leaving the flag on advertised
+    streaming barge-in that the pipeline could not deliver.
+
+    What the strategy still does, on finals, is the job it was chosen for: a
+    one-word "हाँ" while the agent is speaking does not take the floor. What it
+    no longer claims to do is interrupt mid-utterance -- with no partials, that
+    is Silero's `start_secs` alone.
     """
     return UserTurnStrategies(
-        start=[MinWordsUserTurnStartStrategy(min_words=2, use_interim=True)],
+        start=[MinWordsUserTurnStartStrategy(min_words=2)],
         stop=[
             TurnAnalyzerUserTurnStopStrategy(
                 turn_analyzer=LocalSmartTurnAnalyzerV3(
@@ -936,6 +966,14 @@ __all__ = ["DunningSession", "SpokenFormFilter", "bot", "build_backchannel",
 
 if __name__ == "__main__":
     from pipecat.runner.run import main
+
+    # Pipecat's startup banner is drawn with box characters, and the Windows
+    # console defaults to cp1252, which cannot encode them -- the runner dies
+    # on its own banner before the agent ever binds a port. Same guard as
+    # app/report.py uses for rupee signs.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
 
     logging.basicConfig(level=logging.INFO)
     main()

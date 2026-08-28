@@ -1,0 +1,30 @@
+# The voice agent, as its own image and its own Cloud Run service.
+#
+# Separate from the webhook image on purpose. The webhook container is small
+# and scales to zero; this one carries onnxruntime, Silero and the smart-turn
+# model, and must keep a CPU allocated for the whole length of a call. Putting
+# both in one image would make every webhook cold start pay for a voice stack
+# it never uses.
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONIOENCODING=utf-8 \
+    PATH="/srv/.venv/bin:$PATH"
+
+COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /usr/local/bin/uv
+
+WORKDIR /srv
+
+# onnxruntime and friends need a C++ runtime that python:slim does not ship.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libgomp1 libstdc++6 ffmpeg \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --group pipecat --no-install-project
+
+COPY app app
+
+# Cloud Run injects PORT. Twilio Media Streams connect to /ws on this server.
+CMD ["sh", "-c", "python -m app.voice.pipecat_agent -t twilio --host 0.0.0.0 --port ${PORT:-8080}"]
