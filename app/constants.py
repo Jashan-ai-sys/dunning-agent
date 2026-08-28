@@ -43,6 +43,7 @@ class ActionType(StrEnum):
     PROMISE_MADE = "promise_made"
     PAYMENT_LINK_CREATED = "payment_link_created"
     MANDATE_RETRIED = "mandate_retried"
+    MANDATE_LINK_SENT = "mandate_link_sent"
     PAYMENT_CAPTURED = "payment_captured"
     STOPPED = "stopped"
 

@@ -145,3 +145,79 @@ async def _log_failure(session: AsyncSession, case: RecoveryCase, reason: str) -
     await log_action(
         session, case, ActionType.MANDATE_RETRIED, {"charged": False, "reason": reason}
     )
+
+
+async def send_mandate_link(
+    session: AsyncSession,
+    case: RecoveryCase,
+    customer: Customer,
+    client: RazorpayClient,
+    *,
+    settings: Settings,
+    sms=None,
+) -> str | None:
+    """Send the customer the link that re-authorises their mandate.
+
+    A payment link settles what is owed. It does not bring a revoked mandate
+    back, so the next cycle fails in exactly the same way -- which is the whole
+    reason ``CUSTOMER_INSTRUMENT`` earns a call rather than a link. Until now
+    the agent could diagnose that and then had no tool to act on it: asked for
+    the mandate link on a real call, the only thing it could send was the
+    payment link again.
+
+    The link is the subscription's own ``short_url``, fetched live rather than
+    stored: it is Razorpay's hosted authorisation page and they own its
+    lifetime.
+
+    Delivery is ours. Razorpay notifies for payment links and has no equivalent
+    for subscriptions, so this goes out over the same Twilio number that placed
+    the call.
+
+    Returns the URL when it was sent, None otherwise. The agent is instructed
+    never to claim it sent a link it did not, so None must stay distinguishable
+    from success.
+    """
+    if not case.razorpay_subscription_id:
+        await _log_failure(session, case, "no subscription to re-authorise")
+        return None
+    if not customer.phone or customer.phone_is_wrong:
+        await _log_failure(session, case, "no usable number to send a mandate link to")
+        return None
+
+    subscription = await client.fetch_subscription(case.razorpay_subscription_id)
+    url = subscription.get("short_url")
+    if not url:
+        await _log_failure(session, case, "subscription carries no authorisation link")
+        return None
+
+    body = (
+        f"{settings.company_name}: aapka auto-pay mandate dobara set karne ke liye "
+        f"is link par jaayein - {url}"
+    )
+    sender = sms or _default_sms
+    sid = await sender(customer.phone, body)
+    if sid is None:
+        await _log_failure(session, case, "could not send the mandate link")
+        return None
+
+    await log_action(
+        session,
+        case,
+        ActionType.MANDATE_LINK_SENT,
+        {
+            "short_url": url,
+            "razorpay_subscription_id": case.razorpay_subscription_id,
+            "subscription_status": subscription.get("status"),
+            "message_sid": sid,
+        },
+    )
+    logger.info("sent mandate link for case %s", case.id)
+    return url
+
+
+async def _default_sms(to: str, body: str) -> str | None:
+    """Imported lazily: the telephony module pulls in Twilio settings that the
+    webhook service has no reason to load."""
+    from app.voice.telephony import TwilioChannel
+
+    return await TwilioChannel().send_sms(to, body)

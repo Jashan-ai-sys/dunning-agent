@@ -28,7 +28,7 @@ from sqlalchemy import select
 from app.db import SessionLocal
 from app.metrics import rupees
 from app.models import Customer, RecoveryCase
-from app.voice.persistence import send_payment_link_now
+from app.voice.persistence import send_mandate_link_now, send_payment_link_now
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +90,37 @@ async def send_payment_link() -> dict:
         "guidance": (
             "Do NOT tell the customer a link was sent. Apologise briefly and say "
             "a colleague will follow up."
+        ),
+    }
+
+
+@mcp.tool()
+async def send_mandate_link() -> dict:
+    """Send the link that re-activates the customer's auto-pay mandate, by SMS.
+
+    Use this when the mandate itself is the problem -- it was cancelled,
+    revoked, or the card behind it is dead. A payment link settles what is owed
+    today; only this stops the same failure happening again next cycle.
+
+    Both can be right on one call: send the payment link for the arrears and
+    this one for the mandate. Takes no arguments. Never claim it was sent
+    unless this returns ``sent: true``.
+    """
+    result = await send_mandate_link_now(_bound_case_id())
+    if result.get("sent"):
+        return {
+            "sent": True,
+            "guidance": (
+                "Tell them a link to set up auto-pay again has gone by SMS, and "
+                "that it takes a minute. Do not read the URL aloud."
+            ),
+        }
+    return {
+        "sent": False,
+        "reason": result.get("reason", "unknown"),
+        "guidance": (
+            "Do NOT tell the customer a link was sent. Say a colleague will "
+            "follow up about re-activating auto-pay."
         ),
     }
 

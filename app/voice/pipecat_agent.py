@@ -28,10 +28,14 @@ from mcp import StdioServerParameters
 from pipecat.adapters.schemas.function_schema import FunctionSchema
 from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
-from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
-from pipecat.frames.frames import EndFrame, FunctionCallResultProperties, LLMRunFrame
+from pipecat.frames.frames import (
+    EndFrame,
+    FunctionCallResultProperties,
+    LLMRunFrame,
+    TTSSpeakFrame,
+)
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
@@ -59,7 +63,9 @@ from app.config import get_settings
 from app.constants import CallStatus
 from app.store import utcnow
 from app.voice.call_body import load_call_body
-from app.voice.flow import DUNNING_FLOW, halt_note, language_hint
+from app.voice.flow import DUNNING_FLOW, greeting_for, halt_note, language_hint
+from app.voice.graph import NodeKind
+from app.voice.instrumentation import TimedSileroVAD, TimedSmartTurnAnalyzer
 from app.voice.intents import CallIntent
 from app.voice.normalizers import (
     normalize_amounts_for_tts,
@@ -365,7 +371,7 @@ def build_vad() -> SileroVADAnalyzer:
     what catches an interruption while the agent is mid-sentence.
     """
     settings = get_settings()
-    return SileroVADAnalyzer(
+    return TimedSileroVAD(
         params=VADParams(
             confidence=settings.vad_activation_threshold,
             # NOT settings.vad_min_silence_duration (0.3), which is a 0.0.108
@@ -376,12 +382,14 @@ def build_vad() -> SileroVADAnalyzer:
             # STT wait window and delays turns. The LiveKit path keeps 0.3,
             # where the parameter still has its old meaning.
             stop_secs=0.2,
-            # 0.4 was Blostem's value, held high to suppress false barge-ins
-            # after they reverted an 0.2 experiment. 0.3 splits that
-            # difference: barge-in engages a tenth of a second sooner, without
-            # returning to the value they found too eager. If the agent starts
-            # being cut off by line noise or a cough, this is the knob.
-            start_secs=0.3,
+            # 0.4 was Blostem's value, held high after they reverted an 0.2
+            # experiment as too eager. We are back at 0.2 deliberately: the
+            # word threshold that compensates for it is higher here than it
+            # was there (min_words=3, vs their VAD-only start), so a cough or a
+            # syllable of line noise still has to become three words before it
+            # takes the floor. If the agent starts getting cut off mid
+            # sentence, this is the first knob to put back.
+            start_secs=0.2,
             min_volume=0.6,
         )
     )
@@ -406,7 +414,9 @@ def build_turn_strategies() -> UserTurnStrategies:
     the threshold while the agent is speaking; once the agent is silent a
     single word starts the turn. That is exactly the behaviour this call needs,
     because Hindi speakers backchannel constantly ("हाँ", "जी", "अच्छा") and
-    every one of those would otherwise cut the agent off mid-sentence.
+    every one of those would otherwise cut the agent off mid-sentence. Three
+    rather than two: two-word acknowledgements ("हाँ जी", "ठीक है", "अच्छा जी")
+    are just as common as one-word ones, and were still taking the floor.
 
     `use_interim` is off, and deliberately so rather than by oversight. It asks
     the strategy to count words as partial transcripts stream in, which is what
@@ -422,10 +432,10 @@ def build_turn_strategies() -> UserTurnStrategies:
     is Silero's `start_secs` alone.
     """
     return UserTurnStrategies(
-        start=[MinWordsUserTurnStartStrategy(min_words=2)],
+        start=[MinWordsUserTurnStartStrategy(min_words=3)],
         stop=[
             TurnAnalyzerUserTurnStopStrategy(
-                turn_analyzer=LocalSmartTurnAnalyzerV3(
+                turn_analyzer=TimedSmartTurnAnalyzer(
                     # Generous on purpose: this only applies when the model has
                     # classified the turn as *incomplete*, i.e. someone is
                     # visibly still thinking. Rushing them here is the failure
@@ -559,6 +569,27 @@ class DunningSession:
 
         if self.walker.finished:
             self.finished.set()
+
+    def opening_line(self) -> str | None:
+        """The greeting to speak on connect, or None to let the model write it.
+
+        None when the setting is off, or when the call did not start at the
+        greeting node -- a resumed or replayed call is mid-conversation, and
+        opening it with "hello, is that Asha" would be wrong.
+        """
+        if not get_settings().cached_greeting_enabled:
+            return None
+        if self.walker.node.kind is not NodeKind.START:
+            return None
+        return greeting_for(self.language, self.walker.context)
+
+    def note_assistant_said(self, text: str) -> None:
+        """Record a line we spoke without asking the model for it.
+
+        Without this the model does not know it has already greeted, and opens
+        its next turn by greeting again -- a bug this repo has fixed once.
+        """
+        self.llm_context.add_message({"role": "assistant", "content": text})
 
     def _model_spoke_this_turn(self) -> bool:
         """Did the model produce speech in the same response as the tool call?
@@ -834,7 +865,16 @@ async def _run_pipeline(session, transport, stt, llm, tts, aggregators) -> Dunni
 
     @transport.event_handler("on_client_connected")
     async def _on_connected(_transport, _client):
-        await task.queue_frames([LLMRunFrame()])
+        opening = session.opening_line()
+        if opening is None:
+            await task.queue_frames([LLMRunFrame()])
+            return
+        # Speak it directly and record it as ours. No LLM turn: there is no
+        # customer input yet to reason about, and the round trip is half a
+        # second of silence at the moment they have just said hello.
+        session.note_assistant_said(opening)
+        logger.info("opened with the rendered greeting")
+        await task.queue_frames([TTSSpeakFrame(opening)])
 
     @transport.event_handler("on_client_disconnected")
     async def _on_disconnected(_transport, _client):

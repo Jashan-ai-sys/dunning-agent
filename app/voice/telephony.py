@@ -142,6 +142,36 @@ class TwilioChannel:
             "MachineDetectionTimeout": str(settings.machine_detection_timeout),
         }
 
+    async def send_sms(self, to: str, body: str) -> str | None:
+        """Send one SMS from the same Twilio number that places the calls.
+
+        Razorpay delivers payment links itself; there is no equivalent for a
+        subscription's authorisation link, so anything we want the customer to
+        receive mid-call has to go out over our own channel.
+
+        Returns the message sid, or None if it could not be sent. Never raises:
+        a failed SMS is not a reason to break a call that is going well, and
+        the agent has been told never to claim it sent something it did not.
+        """
+        url = f"{self._account_url}/Messages.json"
+        try:
+            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
+                response = await client.post(
+                    url,
+                    data={"To": to, "From": self._settings.twilio_from_number, "Body": body},
+                    auth=(
+                        self._settings.twilio_account_sid,
+                        self._settings.twilio_auth_token,
+                    ),
+                )
+            response.raise_for_status()
+        except Exception:  # noqa: BLE001 - never break a call over an SMS
+            logger.exception("could not send SMS to %s", to)
+            return None
+        sid = response.json().get("sid")
+        logger.info("sent SMS %s to %s", sid, to)
+        return sid
+
     async def hang_up(self, call_sid: str) -> None:
         """End a call in progress. Used when a recording answered."""
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:

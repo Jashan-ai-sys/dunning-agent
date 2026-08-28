@@ -61,6 +61,33 @@ finished: never repeat it, and never greet or introduce yourself twice."""
 )
 
 
+#: The opening line, rendered rather than generated.
+#:
+#: The greeting is the one turn with no input to reason about -- there is
+#: nothing the customer has said yet. Asking the LLM for it costs a full round
+#: trip (~0.5s measured) at the moment the customer has just said "hello" and
+#: is listening hardest. Rendering it locally means the first word leaves as
+#: soon as TTS can synthesise it (~80ms).
+#:
+#: It is appended to the context as the assistant's own first turn, so the
+#: model knows it has already greeted. Without that it opens the next turn by
+#: greeting again, which is a bug this repo has fixed once already.
+GREETING = {
+    "hi": "नमस्ते, मैं {company_name} से बात कर रहा हूँ। क्या मेरी बात {customer_name} से हो रही है?",
+    "hinglish": "नमस्ते, मैं {company_name} से बात कर रहा हूँ। क्या मेरी बात {customer_name} से हो रही है?",
+    "en": "Hello, I am calling from {company_name}. Am I speaking with {customer_name}?",
+}
+
+
+def greeting_for(language: str, context: dict) -> str:
+    """The opening line for a language, with the call's names filled in."""
+    template = GREETING.get(language, GREETING["hi"])
+    return template.format(
+        company_name=context.get("company_name", "we"),
+        customer_name=context.get("customer_name", "you"),
+    )
+
+
 GREET = Node(
     id="greet",
     kind=NodeKind.START,
@@ -164,6 +191,10 @@ ASK_INTENT = Node(
         "The right remedy for this particular failure has already been decided; "
         "work it into what you offer rather than inventing your own:\n"
         "{suggested_route}\n\n"
+        "If the mandate itself is dead -- cancelled, revoked, or the card behind "
+        "it gone -- also call `send_mandate_link`. The payment link settles what "
+        "is owed; only that one stops the same failure next cycle. Both can be "
+        "right on one call.\n\n"
         "If they agree to pay now, call the `send_payment_link` tool FIRST and "
         "wait for its result. Only say the link has been sent once that tool "
         "confirms it. Never promise a link you have not actually sent."

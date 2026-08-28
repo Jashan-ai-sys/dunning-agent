@@ -190,3 +190,45 @@ async def duration_since(started_at) -> int | None:
     if started_at is None:
         return None
     return max(0, int((utcnow() - started_at).total_seconds()))
+
+
+async def send_mandate_link_now(recovery_case_id: int | None) -> dict:
+    """Send the mandate re-authorisation link for a case. The MCP seam.
+
+    Mirrors ``send_payment_link_now``: opens its own session, never raises, and
+    reports failure explicitly so the agent can be told not to claim it sent
+    something it did not.
+    """
+    if not recovery_case_id:
+        return {"sent": False, "reason": "no case bound to this call"}
+
+    from app.config import get_settings
+    from app.mandate import send_mandate_link
+
+    try:
+        async with SessionLocal() as session:
+            case = await session.get(RecoveryCase, int(recovery_case_id))
+            if case is None:
+                return {"sent": False, "reason": "case not found"}
+            customer = None
+            if case.razorpay_customer_id:
+                customer = (
+                    await session.execute(
+                        select(Customer).where(
+                            Customer.razorpay_customer_id == case.razorpay_customer_id
+                        )
+                    )
+                ).scalar_one_or_none()
+            if customer is None:
+                return {"sent": False, "reason": "no customer record"}
+
+            url = await send_mandate_link(
+                session, case, customer, RazorpayClient(), settings=get_settings()
+            )
+            await session.commit()
+            if url is None:
+                return {"sent": False, "reason": "could not send the mandate link"}
+            return {"sent": True, "url": url}
+    except Exception as exc:  # noqa: BLE001 - never break the call
+        logger.exception("could not send a mandate link")
+        return {"sent": False, "reason": str(exc)[:120]}

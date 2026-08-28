@@ -109,6 +109,12 @@ class Settings(BaseSettings):
     vad_min_silence_duration: float = 0.3
     vad_min_speech_duration: float = 0.05
 
+    # Speak a rendered opening line instead of asking the LLM for one.
+    # The greeting is the only turn with no input to reason about, so the
+    # round trip buys nothing and costs the customer half a second at the
+    # moment they are listening hardest. Off makes the model generate it.
+    cached_greeting_enabled: bool = True
+
     # --- Voice ---
     livekit_url: str = ""
     livekit_api_key: str = ""
