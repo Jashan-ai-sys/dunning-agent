@@ -1,12 +1,19 @@
 """Applying a call result to a recovery case."""
 
+from datetime import timedelta
+
 import pytest
 from sqlalchemy import select
 
+from app.config import Settings
 from app.constants import ActionType, CallStatus, CaseStatus
 from app.models import Customer, RecoveryAction, RecoveryCase, VoiceCall
 from app.voice.intents import CallIntent
 from app.voice.outcomes import CallResult, apply_call_result
+
+
+def settings(**overrides) -> Settings:
+    return Settings(**{"promise_window_hours": 48, **overrides})
 
 
 async def seed(session, **case_kwargs) -> tuple[RecoveryCase, VoiceCall]:
@@ -67,7 +74,12 @@ async def test_retry_now_records_the_call_without_closing_the_case(session):
     assert call.final_node_id == "pay_now"
     assert call.duration_seconds == 42
     assert call.ended_at is not None
-    assert await actions_for(session, case.id) == [ActionType.VOICE_CALL]
+    # The promise is logged before the call record: it is the thing that
+    # happened *during* the call, and the call row wraps it.
+    assert await actions_for(session, case.id) == [
+        ActionType.PROMISE_MADE,
+        ActionType.VOICE_CALL,
+    ]
 
 
 async def test_decline_closes_the_case_and_stops_contact(session):
@@ -94,6 +106,66 @@ async def test_wrong_number_stops_contact_immediately(session):
     await session.refresh(case)
     assert case.status == CaseStatus.STOPPED
     assert case.attempt_count == case.max_attempts
+
+
+async def customer_for(session, razorpay_customer_id: str = "cust_1") -> Customer:
+    return (
+        await session.execute(
+            select(Customer).where(Customer.razorpay_customer_id == razorpay_customer_id)
+        )
+    ).scalar_one()
+
+
+@pytest.mark.parametrize("intent", [CallIntent.DECLINED, CallIntent.DISPUTE])
+async def test_a_refusal_closes_the_door_on_the_customer(session, intent):
+    """Case-scoped suppression is not enough: the obligation follows the person.
+
+    Without this the same person is called again as soon as another charge of
+    theirs fails, with a fresh attempt budget.
+    """
+    case, call = await seed(session)
+    who = await customer_for(session)
+
+    await apply_call_result(session, case, call, CallResult(intent=intent), customer=who)
+    await session.commit()
+
+    await session.refresh(who)
+    assert who.do_not_contact is True
+    assert who.do_not_contact_reason == str(intent)
+    assert who.do_not_contact_at is not None
+
+
+async def test_a_wrong_number_marks_the_number_not_the_person(session):
+    """The stranger who answered is not this customer.
+
+    Banning the person would also block an email payment link that has nothing
+    to do with the bad phone -- and they still owe the money.
+    """
+    case, call = await seed(session)
+    who = await customer_for(session)
+
+    await apply_call_result(
+        session, case, call, CallResult(intent=CallIntent.WRONG_NUMBER), customer=who
+    )
+    await session.commit()
+
+    await session.refresh(who)
+    assert who.phone_is_wrong is True
+    assert not who.do_not_contact
+
+
+async def test_a_retryable_intent_leaves_the_customer_contactable(session):
+    case, call = await seed(session)
+    who = await customer_for(session)
+
+    await apply_call_result(
+        session, case, call, CallResult(intent=CallIntent.RETRY_LATER), customer=who
+    )
+    await session.commit()
+
+    await session.refresh(who)
+    assert not who.do_not_contact
+    assert not who.phone_is_wrong
 
 
 async def test_dispute_flags_for_human_review(session):
@@ -238,3 +310,74 @@ async def test_a_failed_link_does_not_lose_the_call_record(session):
     await session.refresh(case)
     assert case.payment_link_id is None
     assert ActionType.VOICE_CALL in await actions_for(session, case.id)
+
+
+# --- Promise to pay -------------------------------------------------------
+
+
+async def test_a_commitment_to_pay_starts_the_promise_clock(session):
+    case, call = await seed(session)
+
+    await apply_call_result(
+        session, case, call, CallResult(intent=CallIntent.RETRY_NOW), settings=settings()
+    )
+    await session.commit()
+
+    await session.refresh(case)
+    assert case.promised_at is not None
+    assert case.promise_due_at == case.promised_at + timedelta(hours=48)
+
+
+async def test_agreeing_to_a_later_call_is_not_a_promise_to_pay(session):
+    """Call me tomorrow is not I will pay. Counting it as one would inflate the
+    kept-promise rate with people who committed to nothing."""
+    case, call = await seed(session)
+
+    await apply_call_result(
+        session, case, call, CallResult(intent=CallIntent.RETRY_LATER), settings=settings()
+    )
+    await session.commit()
+
+    await session.refresh(case)
+    assert case.promised_at is None
+    assert ActionType.PROMISE_MADE not in await actions_for(session, case.id)
+
+
+async def test_the_promise_window_is_configurable(session):
+    case, call = await seed(session)
+
+    await apply_call_result(
+        session,
+        case,
+        call,
+        CallResult(intent=CallIntent.RETRY_NOW),
+        settings=settings(promise_window_hours=6),
+    )
+    await session.commit()
+
+    await session.refresh(case)
+    assert case.promise_due_at == case.promised_at + timedelta(hours=6)
+
+
+async def test_a_second_promise_replaces_the_first(session):
+    """The live deadline is the most recent one they agreed to."""
+    case, call = await seed(session)
+
+    await apply_call_result(
+        session, case, call, CallResult(intent=CallIntent.RETRY_NOW), settings=settings()
+    )
+    await session.commit()
+    await session.refresh(case)
+    first_due = case.promise_due_at
+
+    await apply_call_result(
+        session,
+        case,
+        call,
+        CallResult(intent=CallIntent.RETRY_NOW),
+        settings=settings(promise_window_hours=72),
+    )
+    await session.commit()
+
+    await session.refresh(case)
+    assert case.promise_due_at > first_due

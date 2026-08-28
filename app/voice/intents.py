@@ -34,12 +34,19 @@ class IntentOutcome:
     suppress_contact: bool = False
     #: Needs a human, not another automated attempt.
     needs_human: bool = False
+    #: The customer committed to paying. Starts the promise-to-pay clock.
+    promises_payment: bool = False
 
 
 OUTCOMES: dict[CallIntent, IntentOutcome] = {
     # Wants to pay now: keep the case open until the payment actually lands.
-    CallIntent.RETRY_NOW: IntentOutcome(status=None, send_payment_link=True),
-    # Asked us to try later: the backoff window handles the timing.
+    CallIntent.RETRY_NOW: IntentOutcome(
+        status=None, send_payment_link=True, promises_payment=True
+    ),
+    # Asked us to try later. Deliberately *not* a promise to pay: agreeing to
+    # another call is not agreeing to settle, and counting it as one would
+    # inflate the kept-promise rate with people who never committed to
+    # anything. The backoff window handles the timing.
     CallIntent.RETRY_LATER: IntentOutcome(status=None),
     # An explicit no is a stopping rule -- we do not keep calling.
     CallIntent.DECLINED: IntentOutcome(status=CaseStatus.DECLINED, suppress_contact=True),
