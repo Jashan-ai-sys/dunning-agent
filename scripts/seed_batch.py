@@ -47,13 +47,24 @@ PLAN_AMOUNTS = [4_900, 9_900, 19_900, 29_900, 49_900, 99_900, 249_900, 4_000]
 
 # Failure reasons weighted roughly as Razorpay reports them: most recurring
 # failures are bank-side, not the customer's fault.
+# (error_code, error_source, error_reason, description, weight). The source and
+# reason are what app.diagnosis reads, so a seeded batch exercises the real
+# root-cause routing rather than falling through to "unknown".
 FAILURE_MODES = [
-    ("BAD_REQUEST_ERROR", "Your card has insufficient funds.", 34),
-    ("GATEWAY_ERROR", "The bank could not process the request.", 22),
-    ("BAD_REQUEST_ERROR", "Your card has expired.", 14),
-    ("BAD_REQUEST_ERROR", "The payment mandate was revoked by the customer.", 12),
-    ("BAD_REQUEST_ERROR", "Transaction limit exceeded for this card.", 10),
-    ("SERVER_ERROR", "The issuing bank is temporarily unavailable.", 8),
+    ("BAD_REQUEST_ERROR", "issuer", "insufficient_funds",
+     "Your card has insufficient funds.", 34),
+    ("GATEWAY_ERROR", "gateway", None,
+     "The bank could not process the request.", 22),
+    ("BAD_REQUEST_ERROR", "customer", "card_expired",
+     "Your card has expired.", 14),
+    ("BAD_REQUEST_ERROR", "customer", "mandate_revoked",
+     "The payment mandate was revoked by the customer.", 12),
+    # A reason the diagnosis table has never seen: it must degrade to the
+    # source rather than to "unknown".
+    ("BAD_REQUEST_ERROR", "issuer", "transaction_limit_exceeded",
+     "Transaction limit exceeded for this card.", 10),
+    ("SERVER_ERROR", "bank", None,
+     "The issuing bank is temporarily unavailable.", 8),
 ]
 
 NAMES = [
@@ -76,8 +87,37 @@ INTENT_MIX = (
     + [CallIntent.DISPUTE] * 3
 )
 
-# Of those who asked for a link, how many actually pay it.
+# Of those who asked for a link on a call, how many actually pay it.
 LINK_CONVERSION = 0.62
+
+# Of those who were sent a link without being spoken to, how many pay it. Much
+# lower, which is the whole reason the ladder escalates to a call at all.
+COLD_LINK_CONVERSION = 0.18
+
+
+class SeedRazorpay:
+    """Stands in for the payment-link API during a simulated batch.
+
+    The cheap intervention talks to Razorpay, so without this a seeded run
+    would create *real* payment links on the merchant account against
+    synthetic debts. Every id it returns is prefixed ``plink_seed_`` so a link
+    from a simulation can never be mistaken for one a customer was sent.
+    """
+
+    def __init__(self) -> None:
+        self.created: list[dict] = []
+
+    async def create_payment_link(self, payload: dict) -> dict:
+        self.created.append(payload)
+        n = len(self.created)
+        return {
+            "id": f"plink_seed_{n}",
+            "short_url": f"https://example.invalid/seed/{n}",
+            "reference_id": payload["reference_id"],
+        }
+
+    async def notify_payment_link(self, link_id: str, medium: str) -> dict:
+        return {"success": True}
 
 
 class SeedChannel:
@@ -138,7 +178,9 @@ async def seed(session, count: int, rng: random.Random) -> int:
                 status="pending",
             )
         )
-        code, description, _ = rng.choices(FAILURE_MODES, weights=weights, k=1)[0]
+        code, error_source, reason_code, description, _ = rng.choices(
+            FAILURE_MODES, weights=weights, k=1
+        )[0]
         case = RecoveryCase(
             razorpay_payment_id=f"pay_seed_{i}",
             razorpay_subscription_id=subscription_id,
@@ -146,20 +188,67 @@ async def seed(session, count: int, rng: random.Random) -> int:
             original_amount=amount,
             failure_code=code,
             failure_reason=description,
+            failure_source=error_source,
+            failure_reason_code=reason_code,
             status=CaseStatus.OPEN,
             source=SEED,
             # Spread over the past week so the batch looks like a real backlog.
             created_at=now - timedelta(hours=rng.randint(1, 168)),
+            # Razorpay has already given up on some of them. The rest are
+            # still inside its retry sequence and the policy defers to it --
+            # bounded by bank_retry_grace_hours, so they are worked eventually
+            # either way; this just makes the batch show both paths.
+            halted_at=now - timedelta(hours=rng.randint(1, 48)) if rng.random() < 0.45
+            else None,
         )
         session.add(case)
         await session.flush()
         await log_action(
             session, case, ActionType.CASE_OPENED,
-            {"source": SEED, "error_code": code, "amount": amount},
+            {
+                "source": SEED,
+                "error_code": code,
+                "error_source": error_source,
+                "error_reason": reason_code,
+                "amount": amount,
+            },
         )
 
     await session.commit()
     return count
+
+
+async def _settle_unprompted_links(session, rng: random.Random, now) -> int:
+    """Pay off some of the cases holding a link that nobody has called about.
+
+    Deliberately a lower rate than ``LINK_CONVERSION``: a link somebody asked
+    for on a call converts far better than one that arrived unannounced.
+    """
+    cases = (
+        await session.execute(
+            select(RecoveryCase)
+            .where(RecoveryCase.source == SEED)
+            .where(RecoveryCase.status == CaseStatus.IN_PROGRESS)
+            .where(RecoveryCase.payment_link_id.isnot(None))
+            .where(RecoveryCase.attempt_count == 1)
+        )
+    ).scalars().all()
+
+    paid = 0
+    for case in cases:
+        if rng.random() >= COLD_LINK_CONVERSION:
+            continue
+        case.status = CaseStatus.RECOVERED
+        case.recovered_payment_id = f"pay_seed_link_{case.id}"
+        case.recovered_amount = case.original_amount
+        case.recovered_at = now
+        await log_action(
+            session, case, ActionType.PAYMENT_CAPTURED,
+            {"source": SEED, "amount": case.original_amount, "simulated": True,
+             "via": "payment_link"},
+        )
+        paid += 1
+    return paid
 
 
 async def simulate(session, rng: random.Random, days: int) -> dict[str, int]:
@@ -173,15 +262,25 @@ async def simulate(session, rng: random.Random, days: int) -> dict[str, int]:
     call anyone and the batch would never move.
     """
     tally: dict[str, int] = {}
-    base = utcnow().astimezone(ZoneInfo("Asia/Kolkata")).replace(
+    # Run the window so it *ends* today rather than starting today. Simulating
+    # forward put every promise deadline in the future, which meant no promise
+    # could ever be scored as broken and the report read 100% kept -- a number
+    # that says nothing. Ending today lets the early days' promises resolve.
+    base = (utcnow() - timedelta(days=days - 1)).astimezone(ZoneInfo("Asia/Kolkata")).replace(
         hour=14, minute=0, second=0, microsecond=0
     )
 
     for day in range(days):
         now = base + timedelta(days=day)
         channel = SeedChannel(rng)
-        result = await run_once(session, channel, now=now)
+        result = await run_once(session, channel, now=now, client=SeedRazorpay())
         print(f"  day {day + 1}: {result.as_dict()}")
+
+        # Some people simply pay the link. Modelling this matters: the ladder
+        # sends a link before it spends a call, so a simulation that only ever
+        # converts after a conversation would make the cheap intervention look
+        # worthless when it is the one doing most of the work.
+        await _settle_unprompted_links(session, rng, now)
 
         cases = (
             await session.execute(
@@ -217,7 +316,7 @@ async def simulate(session, rng: random.Random, days: int) -> dict[str, int]:
                 session, case, call,
                 CallResult(intent=intent, final_node_id=str(intent),
                            duration_seconds=call.duration_seconds),
-                customer=customer, client=None,
+                customer=customer, client=None, now=now,
             )
 
             # Those who asked for a link: some of them actually pay it. This is the
@@ -226,7 +325,13 @@ async def simulate(session, rng: random.Random, days: int) -> dict[str, int]:
                 case.status = CaseStatus.RECOVERED
                 case.recovered_payment_id = f"pay_seed_recovered_{case.id}"
                 case.recovered_amount = case.original_amount
-                case.recovered_at = utcnow()
+                # Simulated time, not real time. Paying "now" against a promise
+                # stamped with the same clock is what makes the kept/broken
+                # split mean anything; the ones who never pay drift past their
+                # deadline as the days advance and show up as broken.
+                case.recovered_at = min(
+                    now + timedelta(hours=rng.randint(1, 60)), utcnow()
+                )
                 await log_action(
                     session, case, ActionType.PAYMENT_CAPTURED,
                     {"source": SEED, "amount": case.original_amount, "simulated": True},

@@ -1,11 +1,13 @@
 """Batch metrics. These are the numbers judges read, so the definitions matter
 more than the SQL."""
 
+from datetime import UTC, datetime, timedelta
+
 import pytest
 
-from app.constants import CallStatus, CaseStatus
+from app.constants import ActionType, CallStatus, CaseStatus
 from app.metrics import BatchMetrics, compute_metrics, format_report, rupees
-from app.models import RecoveryCase, VoiceCall
+from app.models import RecoveryAction, RecoveryCase, VoiceCall
 
 
 async def add_case(session, payment_id, amount, status=CaseStatus.OPEN, **kwargs):
@@ -255,3 +257,133 @@ async def test_call_counts_respect_the_source_filter(session):
 
     assert (await compute_metrics(session, source="seed")).calls_placed == 1
     assert (await compute_metrics(session, source="razorpay")).calls_by_intent == {"declined": 1}
+
+
+# --- promise to pay ----------------------------------------------------
+
+NOW = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
+
+
+async def add_promise(session, case, due_at):
+    """One promise, as the agent records it: an audit row carrying its own
+    deadline. The case columns hold only the most recent one."""
+    session.add(
+        RecoveryAction(
+            recovery_case_id=case.id,
+            action_type=ActionType.PROMISE_MADE,
+            metadata_json={"due_at": due_at.isoformat(), "amount": case.original_amount},
+        )
+    )
+    case.promised_at = due_at - timedelta(hours=48)
+    case.promise_due_at = due_at
+    await session.flush()
+
+
+def test_an_empty_batch_has_no_promise_rate_rather_than_a_zero_one():
+    """0% next to "broken: 0" would have the report contradict itself."""
+    metrics = BatchMetrics()
+    assert metrics.promise_kept_rate is None
+    assert metrics.promises_broken == 0
+
+
+def test_a_pending_promise_is_not_scored_as_broken():
+    """A batch run an hour ago would otherwise look like total failure."""
+    metrics = BatchMetrics(promises_made=4, promises_kept=1, promises_pending=3)
+    assert metrics.promises_broken == 0
+    # Scored over the one promise that actually resolved.
+    assert metrics.promise_kept_rate == 1.0
+
+
+def test_broken_promises_are_what_is_left_over():
+    metrics = BatchMetrics(promises_made=10, promises_kept=4, promises_pending=2)
+    assert metrics.promises_broken == 4
+    assert metrics.promise_kept_rate == 0.5
+
+
+async def test_paying_before_the_deadline_keeps_the_promise(session):
+    case = await add_case(
+        session,
+        "pay_kept",
+        50_000,
+        status=CaseStatus.RECOVERED,
+        recovered_amount=50_000,
+        recovered_at=NOW - timedelta(hours=1),
+    )
+    await add_promise(session, case, NOW + timedelta(hours=38))
+    await session.commit()
+
+    metrics = await compute_metrics(session, now=NOW)
+
+    assert metrics.promises_made == 1
+    assert metrics.promises_kept == 1
+    assert metrics.promises_pending == 0
+    assert metrics.promises_broken == 0
+    assert metrics.amount_promised == 50_000
+
+
+async def test_paying_after_the_deadline_is_a_recovery_but_a_broken_promise(session):
+    """Late money still counts as recovered. It does not count as kept -- the
+    agent did not get what it was told it would get."""
+    case = await add_case(
+        session,
+        "pay_late",
+        50_000,
+        status=CaseStatus.RECOVERED,
+        recovered_amount=50_000,
+        recovered_at=NOW - timedelta(hours=2),
+    )
+    await add_promise(session, case, NOW - timedelta(days=3))
+    await session.commit()
+
+    metrics = await compute_metrics(session, now=NOW)
+
+    assert metrics.recovered_cases == 1
+    assert metrics.promises_kept == 0
+    assert metrics.promises_broken == 1
+
+
+async def test_an_unpaid_promise_inside_its_window_is_pending(session):
+    case = await add_case(session, "pay_pending", 50_000)
+    await add_promise(session, case, NOW + timedelta(hours=47))
+    await session.commit()
+
+    metrics = await compute_metrics(session, now=NOW)
+
+    assert metrics.promises_pending == 1
+    assert metrics.promises_broken == 0
+    # Nothing has resolved, so there is no rate to report yet.
+    assert metrics.promise_kept_rate is None
+
+
+async def test_cases_that_never_promised_are_outside_the_tracker(session):
+    await add_case(session, "pay_silent", 50_000)
+    await session.commit()
+
+    metrics = await compute_metrics(session, now=NOW)
+
+    assert metrics.total_cases == 1
+    assert metrics.promises_made == 0
+
+
+async def test_a_broken_promise_is_not_erased_by_a_later_one(session):
+    """The bias this metric is derived from audit rows to avoid.
+
+    A customer who breaks a promise and then promises again on the next call
+    overwrites the case's promise columns. Counting per case would score them
+    only on the second promise and quietly drop the broken one -- flattering
+    the rate on exactly the population it exists to catch.
+    """
+    case = await add_case(session, "pay_twice", 50_000)
+    await add_promise(session, case, NOW - timedelta(days=2))   # broken
+    await add_promise(session, case, NOW + timedelta(hours=24))  # still open
+    await session.commit()
+
+    metrics = await compute_metrics(session, now=NOW)
+
+    assert metrics.promises_made == 2
+    assert metrics.cases_with_a_promise == 1
+    assert metrics.promises_broken == 1
+    assert metrics.promises_pending == 1
+    assert metrics.promise_kept_rate == 0.0
+    # The debt is counted once, however many times it was promised.
+    assert metrics.amount_promised == 50_000

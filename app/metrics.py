@@ -12,16 +12,29 @@ The honest definitions matter more than the queries:
   ``subscription.charged`` webhook. A customer promising to pay does not count.
 * the headline rate is **by amount**, not by count, because recovering one
   Rs 5,000 subscription is not the same as recovering one Rs 50 one.
+* a **promise is kept** only when the money landed before the deadline the
+  customer was given. Paying a week late is a recovery, but it is not a kept
+  promise, and conflating the two would make the agent look more persuasive
+  than it is. Promises whose deadline has not passed are counted separately as
+  *pending* rather than silently scored as broken.
+
+Promises are counted from the ``promise_made`` **audit rows**, not from the two
+columns on the case. The columns hold only the live promise, so a customer who
+breaks one and then promises again on a later call would overwrite the broken
+one and be scored on the second -- biasing the kept rate upward on exactly the
+population it exists to catch. One row per promise is the honest denominator.
 """
 
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from sqlalchemy import Integer, case, func, select
+from sqlalchemy import DateTime, Integer, case, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.constants import CaseStatus
-from app.models import RecoveryCase, VoiceCall
+from app.constants import ActionType, CaseSource, CaseStatus
+from app.diagnosis import classify
+from app.models import RecoveryAction, RecoveryCase, VoiceCall
+from app.store import utcnow
 
 
 def rupees(paise: int | None) -> str:
@@ -49,10 +62,24 @@ class BatchMetrics:
     by_status: dict[str, int] = field(default_factory=dict)
     amount_by_status: dict[str, int] = field(default_factory=dict)
     by_failure_code: dict[str, int] = field(default_factory=dict)
+    #: Cases grouped by *why* the charge failed rather than by Razorpay's
+    #: coarse error class -- the view that says which interventions the batch
+    #: actually needed.
+    by_root_cause: dict[str, int] = field(default_factory=dict)
     by_source: dict[str, int] = field(default_factory=dict)
     calls_placed: int = 0
     calls_by_intent: dict[str, int] = field(default_factory=dict)
     median_attempts_to_recover: float | None = None
+    #: Promise-to-pay tracking, counted per *promise* -- one customer who
+    #: promises twice counts twice, because they made two commitments.
+    promises_made: int = 0
+    promises_kept: int = 0
+    promises_pending: int = 0
+    #: How many distinct cases those promises came from, and what they were
+    #: worth. Amount is per case, not per promise: promising the same debt
+    #: twice does not double the debt.
+    cases_with_a_promise: int = 0
+    amount_promised: int = 0
 
     @property
     def recovery_rate_by_amount(self) -> float:
@@ -71,6 +98,25 @@ class BatchMetrics:
     def amount_outstanding(self) -> int:
         return self.amount_at_risk - self.amount_recovered
 
+    @property
+    def promises_broken(self) -> int:
+        """Deadline passed, money never arrived."""
+        return self.promises_made - self.promises_kept - self.promises_pending
+
+    @property
+    def promise_kept_rate(self) -> float | None:
+        """Scored over *resolved* promises only. None when none have resolved.
+
+        Counting still-open promises as broken would punish a batch for having
+        been run recently, which says nothing about whether the agent works.
+        And a batch where nothing has resolved yet has no rate -- printing
+        0.0% next to "broken: 0" would have the report contradict itself.
+        """
+        resolved = self.promises_made - self.promises_pending
+        if not resolved:
+            return None
+        return self.promises_kept / resolved
+
     def as_dict(self) -> dict:
         return {
             "total_cases": self.total_cases,
@@ -83,10 +129,20 @@ class BatchMetrics:
             "by_status": self.by_status,
             "amount_by_status_paise": self.amount_by_status,
             "by_failure_code": self.by_failure_code,
+            "by_root_cause": self.by_root_cause,
             "by_source": self.by_source,
             "calls_placed": self.calls_placed,
             "calls_by_intent": self.calls_by_intent,
             "median_attempts_to_recover": self.median_attempts_to_recover,
+            "promises_made": self.promises_made,
+            "cases_with_a_promise": self.cases_with_a_promise,
+            "promises_kept": self.promises_kept,
+            "promises_pending": self.promises_pending,
+            "promises_broken": self.promises_broken,
+            "promise_kept_rate": (
+                None if self.promise_kept_rate is None else round(self.promise_kept_rate, 4)
+            ),
+            "amount_promised_paise": self.amount_promised,
         }
 
 
@@ -96,14 +152,20 @@ async def compute_metrics(
     since: datetime | None = None,
     until: datetime | None = None,
     source: str | None = None,
+    now: datetime | None = None,
 ) -> BatchMetrics:
     """Aggregate the batch.
 
     ``since``/``until`` bound it by case creation time. ``source`` restricts it
     to real ('razorpay') or seeded ('seed') cases -- never report a figure that
     silently blends the two.
+
+    ``now`` is injectable because one figure here is not purely derived from
+    the rows: whether an unpaid promise is *broken* or merely *pending* depends
+    on the clock.
     """
     metrics = BatchMetrics()
+    now = now or utcnow()
 
     def scoped(stmt, column=RecoveryCase.created_at, case_scoped=True):
         if since is not None:
@@ -161,6 +223,24 @@ async def compute_metrics(
     )
     metrics.by_failure_code = {(code or "unknown"): count for code, count in failure_rows}
 
+    # Grouped in SQL on the two raw columns, then folded into causes in Python:
+    # the mapping lives in app.diagnosis and must not be duplicated as a CASE
+    # expression that could drift away from the rules the policy actually runs.
+    cause_rows = await session.execute(
+        scoped(
+            select(
+                RecoveryCase.failure_source,
+                RecoveryCase.failure_reason_code,
+                func.count(RecoveryCase.id),
+            ).group_by(RecoveryCase.failure_source, RecoveryCase.failure_reason_code)
+        )
+    )
+    causes: dict[str, int] = {}
+    for failure_source, reason_code, count in cause_rows:
+        cause = str(classify(failure_source, reason_code))
+        causes[cause] = causes.get(cause, 0) + count
+    metrics.by_root_cause = dict(sorted(causes.items(), key=lambda kv: -kv[1]))
+
     source_rows = await session.execute(
         scoped(select(RecoveryCase.source, func.count(RecoveryCase.id)).group_by(
             RecoveryCase.source
@@ -188,6 +268,60 @@ async def compute_metrics(
     )
     metrics.calls_by_intent = {(intent or "none"): count for intent, count in intent_rows}
 
+    # One row per promise, joined back to its case for the payment date. The
+    # deadline lives in the action's metadata because it is a property of that
+    # promise, not of the case -- the case only ever remembers the latest one.
+    due_at = cast(RecoveryAction.metadata_json["due_at"].astext, DateTime(timezone=True))
+    promises = await session.execute(
+        scoped(
+            select(
+                func.count(),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (
+                                RecoveryCase.recovered_at.isnot(None)
+                                & (RecoveryCase.recovered_at <= due_at),
+                                1,
+                            ),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (RecoveryCase.recovered_at.is_(None) & (due_at > now), 1),
+                            else_=0,
+                        )
+                    ),
+                    0,
+                ),
+                func.count(func.distinct(RecoveryAction.recovery_case_id)),
+            )
+            .select_from(RecoveryAction)
+            .join(RecoveryCase, RecoveryCase.id == RecoveryAction.recovery_case_id)
+            .where(RecoveryAction.action_type == ActionType.PROMISE_MADE)
+            .where(RecoveryAction.metadata_json["due_at"].astext.isnot(None))
+        )
+    )
+    (
+        metrics.promises_made,
+        metrics.promises_kept,
+        metrics.promises_pending,
+        metrics.cases_with_a_promise,
+    ) = promises.one()
+
+    promised_amount = await session.execute(
+        scoped(
+            select(func.coalesce(func.sum(RecoveryCase.original_amount), 0)).where(
+                RecoveryCase.promised_at.isnot(None)
+            )
+        )
+    )
+    metrics.amount_promised = promised_amount.scalar_one()
+
     median = await session.execute(
         scoped(
             select(
@@ -200,6 +334,10 @@ async def compute_metrics(
     metrics.median_attempts_to_recover = median.scalar_one_or_none()
 
     return metrics
+
+
+def _percent_or_na(rate: float | None) -> str:
+    return "n/a" if rate is None else f"{rate:.1%}"
 
 
 def format_report(metrics: BatchMetrics) -> str:
@@ -225,13 +363,35 @@ def format_report(metrics: BatchMetrics) -> str:
             amount = rupees(metrics.amount_by_status.get(status, 0))
             lines.append(f"    {status:<16} {count:>5}   {amount:>12}")
 
-    if len(metrics.by_source) > 1:
+    # Only seeded data poisons a total. A batch spanning failed subscriptions
+    # and abandoned checkouts is two kinds of real money and adds up fine.
+    if CaseSource.SEED in metrics.by_source and len(metrics.by_source) > 1:
         counts = ", ".join(f"{k}={v}" for k, v in sorted(metrics.by_source.items()))
         lines += [
             "",
             f"  !! MIXED SOURCES ({counts}) -- this total blends real and seeded",
-            "     cases. Re-run with --source razorpay or --source seed.",
+            f"     cases. Re-run with --source {CaseSource.RAZORPAY} or --source"
+            f" {CaseSource.SEED}.",
         ]
+
+    if metrics.promises_made:
+        lines += [
+            "",
+            "  Promises to pay",
+            f"    made               {metrics.promises_made:>5}   "
+            f"across {metrics.cases_with_a_promise} cases, "
+            f"{rupees(metrics.amount_promised)} at stake",
+            f"    kept               {metrics.promises_kept:>5}",
+            f"    broken             {metrics.promises_broken:>5}",
+            f"    pending            {metrics.promises_pending:>5}",
+            f"    kept rate          {_percent_or_na(metrics.promise_kept_rate):>8}   "
+            f"(of resolved)",
+        ]
+
+    if metrics.by_root_cause:
+        lines += ["", "  By root cause"]
+        for cause, count in metrics.by_root_cause.items():
+            lines.append(f"    {cause:<32} {count:>5}")
 
     if metrics.by_failure_code:
         lines += ["", "  By failure code"]

@@ -15,6 +15,7 @@ import json
 import sys
 from datetime import UTC, datetime
 
+from app.constants import CaseSource
 from app.db import SessionLocal, engine
 from app.metrics import compute_metrics, format_report
 
@@ -34,8 +35,9 @@ async def main() -> None:
     parser.add_argument("--csv", metavar="PATH", help="also write a flat CSV summary")
     parser.add_argument("--since", type=_parse_date, help="ISO date, inclusive")
     parser.add_argument("--until", type=_parse_date, help="ISO date, exclusive")
-    parser.add_argument("--source", choices=["razorpay", "seed"],
-                        help="report only real or only seeded cases")
+    parser.add_argument("--source", choices=[s.value for s in CaseSource],
+                        help="report on one source only: a failed subscription "
+                             "charge, an abandoned checkout, or seeded demo data")
     args = parser.parse_args()
 
     try:
