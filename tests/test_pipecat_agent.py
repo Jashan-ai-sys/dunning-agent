@@ -22,6 +22,7 @@ from app.voice.flow import halt_note
 from app.voice.intents import CallIntent, outcome_for
 from app.voice.pipecat_agent import (
     HINDI_CLIP_GROUPS,
+    MAX_TRANSITION_RETRIES,
     SILENT_NODES,
     TRANSPORT_PARAMS,
     DunningSession,
@@ -238,6 +239,118 @@ async def test_an_abandoned_call_records_unclear(monkeypatch):
 
     assert calls[0]["result"].intent == CallIntent.UNCLEAR
     assert calls[0]["result"].final_node_id == "greet"
+
+
+# --- a label the model could not have ------------------------------------
+
+
+class _Params:
+    """Stands in for Pipecat's function-call params: arguments in, result out."""
+
+    def __init__(self, label: str) -> None:
+        self.arguments = {"label": label}
+        self.result = None
+        self.properties = None
+
+    async def result_callback(self, result, properties=None) -> None:
+        self.result = result
+        self.properties = properties
+
+
+async def _at_explain() -> DunningSession:
+    session = DunningSession(context_from_body(BODY))
+    session.walker.transition("identity_confirmed")
+    return session
+
+
+async def test_an_illegal_label_does_not_move_the_call():
+    session = await _at_explain()
+
+    await session.on_transition(_Params("pay_now"))
+
+    assert session.walker.node.id == "explain"
+
+
+async def test_the_rejection_names_the_moves_that_are_legal_here():
+    """`pay_now` is three nodes downstream. The model reached for it because
+    the tool schema advertises every label in the flow -- static on purpose,
+    for the prefix cache -- so the correction has to come from the result."""
+    params = _Params("pay_now")
+    await (await _at_explain()).on_transition(params)
+
+    instruction = params.result["do_this_now"]
+    assert "acknowledged" in instruction
+    assert "disputes_charge" in instruction
+    assert "pay_now" not in instruction
+
+
+async def test_the_rejection_does_not_hand_back_the_node_prompt():
+    """The node opens with the line the model has already delivered. Sending
+    it again is how the agent announces the failed payment twice -- the same
+    bug the greeting override exists to prevent."""
+    params = _Params("pay_now")
+    session = await _at_explain()
+    await session.on_transition(params)
+
+    spoken_prompt = session.walker.graph.render("explain", session.walker.context)
+    assert spoken_prompt not in str(params.result)
+
+
+async def test_the_model_is_asked_again_after_a_rejection():
+    """Silence here is the failure. The model has just told the customer
+    something premised on a move that did not happen."""
+    params = _Params("pay_now")
+    await (await _at_explain()).on_transition(params)
+
+    assert params.properties.run_llm is True
+
+
+async def test_a_run_of_bad_labels_stops_costing_the_customer_dead_air():
+    """A model that is not reading the rejection would loop on it. Past the
+    cap the call carries on: the graph has not moved, and the next customer
+    turn is another chance at the right label."""
+    session = await _at_explain()
+
+    for _ in range(MAX_TRANSITION_RETRIES):
+        params = _Params("pay_now")
+        await session.on_transition(params)
+        assert params.properties.run_llm is True
+
+    params = _Params("pay_now")
+    await session.on_transition(params)
+
+    assert params.properties.run_llm is False
+    assert session.walker.node.id == "explain"
+
+
+async def test_the_budget_is_per_stall_not_per_call():
+    """Counting for the whole call would leave a long conversation with no
+    correction left at the node where it mattered."""
+    session = await _at_explain()
+    await session.on_transition(_Params("pay_now"))
+    assert session._rejections == 1
+
+    await session.on_transition(_Params("acknowledged"))
+
+    assert session.walker.node.id == "reason_inquiry"
+    assert session._rejections == 0
+
+
+async def test_a_rejected_label_is_kept_as_evidence():
+    """A label the model reached for and could not have is a harder negative
+    than anything we would think to write by hand."""
+    session = await _at_explain()
+    await session.on_transition(_Params("pay_now"))
+
+    rejected = [o for o in session.walker.observations_as_dicts() if not o["accepted"]]
+    assert len(rejected) == 1
+    assert rejected[0] == {
+        **rejected[0],
+        "node_id": "explain",
+        "label": "pay_now",
+        "accepted": False,
+    }
+    assert "acknowledged" in rejected[0]["rejection"]
 
 
 # --- a mute agent ---------------------------------------------------------

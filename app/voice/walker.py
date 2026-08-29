@@ -155,19 +155,27 @@ class GraphWalker:
         if self.finished:
             return f"{rendered}\n\nThis is the end of the call. Do not ask any further questions."
 
-        menu = "\n".join(
-            f"- {edge.label}: {edge.condition}" for edge in self._node.edges
-        )
         return (
             f"{rendered}\n\n"
-            "When, and only when, the customer's position is clear, call the "
-            "`transition` tool with the matching label. Do not guess: if it is "
-            "still ambiguous, ask one short clarifying question instead.\n\n"
+            "Call the `transition` tool as soon as one of the labels below "
+            "matches what the customer just said. They describe this moment in "
+            "the call, not their final decision -- staying here to keep talking "
+            "is how a call ends with nothing recorded. If none of them matches "
+            "yet, ask one short clarifying question instead.\n\n"
             "Say your reply in the SAME response as the tool call -- speak "
             "first, then call the tool. A tool call on its own is silence on "
             "the line while you are asked again, and the customer is waiting.\n\n"
-            f"Available labels:\n{menu}"
+            f"Available labels:\n{self.moves()}"
         )
+
+    def moves(self) -> str:
+        """The labels that are legal right now, and what earns each one.
+
+        Split out because a rejected transition needs the moves without the
+        node's prompt -- re-sending the prompt would have the model deliver its
+        opening line a second time.
+        """
+        return "\n".join(f"- {edge.label}: {edge.condition}" for edge in self._node.edges)
 
     def instructions(self) -> str:
         """Preamble and stage as one block, for callers that want a single prompt.

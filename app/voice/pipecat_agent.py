@@ -529,6 +529,8 @@ class DunningSession:
         self.voice_call_id: int | None = None
         self.started_at = utcnow()
         self._finalised = False
+        #: Consecutive rejected transitions since the last accepted one.
+        self._rejections = 0
         #: Errors raised by the TTS service -- lines the agent believes it
         #: delivered and the customer never heard. See `note_tts_failure`.
         self.tts_failures: list[str] = []
@@ -566,11 +568,13 @@ class DunningSession:
                 FunctionSchema(
                     name="transition",
                     description=(
-                        "Move the conversation to the next stage. Call this only when "
-                        "the customer's position is clear; if it is still ambiguous, "
-                        "ask one short clarifying question instead. Only the labels "
-                        "listed in your current stage instructions are accepted; any "
-                        "other label is rejected and you will be asked again."
+                        "Move the conversation to the next stage. Call this as soon "
+                        "as a label matches what the customer just said; if none "
+                        "does yet, ask one short clarifying question instead. Only "
+                        "the labels listed in your CURRENT stage instructions are "
+                        "accepted -- this list is every label in the call, and most "
+                        "of them belong to stages you are not at. Any other label "
+                        "is rejected and you will be asked again."
                     ),
                     properties={
                         "label": {
@@ -592,10 +596,10 @@ class DunningSession:
         try:
             self.walker.transition(label, utterance=self._last_user_said())
         except InvalidTransition as exc:
-            logger.warning("rejected transition %r: %s", label, exc)
-            await params.result_callback({"error": str(exc)})
+            await self._reject_transition(params, label, exc)
             return
 
+        self._rejections = 0
         logger.info("transition %s -> %s", label, self.walker.node.id)
         self.apply_backchannel_policy()
 
@@ -637,6 +641,52 @@ class DunningSession:
 
         if self.walker.finished:
             self.finished.set()
+
+    async def _reject_transition(self, params, label: str, exc: InvalidTransition) -> None:
+        """Refuse the move and give the model what it needs to correct itself.
+
+        The graph refusing an illegal label was never in doubt. What went wrong
+        on a live call is what came next: the rejection was returned as a bare
+        `{"error": ...}`, the model read it as information rather than as a
+        thing to act on, and the call ended at a node it had left conversation-
+        ally ten turns earlier -- recording nothing for a customer who had
+        agreed to pay.
+
+        So it is framed the way an accepted transition is: where you are, and
+        what you may do from here. The node's own prompt is deliberately left
+        out. It opens with the line the model has already delivered, and
+        re-sending it is how you get an agent that announces the failed payment
+        twice.
+
+        Re-running the model is capped. A rejection is one of the few places
+        the model can answer its own output, and a run of invalid labels would
+        otherwise spend Vertex calls and dead air on a loop the customer sits
+        through. Past the cap the conversation simply carries on: the graph has
+        not moved, and the next customer turn is another chance at the right
+        label.
+        """
+        self._rejections += 1
+        retrying = self._rejections <= MAX_TRANSITION_RETRIES
+        logger.warning(
+            "rejected transition %r (%d in a row, %s): %s",
+            label,
+            self._rejections,
+            "asking again" if retrying else "letting the call continue",
+            exc,
+        )
+        await params.result_callback(
+            {
+                "not_moved": str(exc),
+                "still_at_stage": self.walker.node.id,
+                "do_this_now": (
+                    "You have not moved. Do not repeat what you have already "
+                    "said. Choose the label below that matches what the "
+                    "customer just said, or ask one short clarifying question "
+                    f"instead.\n\nAvailable labels:\n{self.walker.moves()}"
+                ),
+            },
+            properties=FunctionCallResultProperties(run_llm=retrying),
+        )
 
     def opening_line(self) -> str | None:
         """The greeting to speak on connect, or None to let the model write it.
@@ -902,6 +952,11 @@ def context_from_body(body: dict) -> dict:
 #: an unlisted tool is refused at the point of use, after the model has
 #: already told the customer it is doing something.
 MCP_TOOLS = ["send_payment_link", "send_mandate_link", "get_case"]
+
+#: How many rejected transitions in a row still earn the model another turn to
+#: pick a legal label. Two is one honest correction plus one, past which it is
+#: not reading the rejection and the customer is listening to us think.
+MAX_TRANSITION_RETRIES = 2
 
 
 def recovery_mcp(recovery_case_id: int | None) -> MCPClient:
