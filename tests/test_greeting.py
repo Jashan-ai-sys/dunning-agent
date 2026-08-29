@@ -80,7 +80,12 @@ def test_speaking_the_greeting_strikes_the_instruction_to_greet():
     messages = session.llm_context.get_messages()
     stage = next(m for m in messages if str(m.get("content", "")).startswith("[STAGE: "))
 
-    assert "ALREADY greeted" in stage["content"]
+    # The original directive must be GONE, not merely contradicted. "Do not
+    # greet again" above "Open the call. Greet them" is a contradiction, and
+    # the model resolves it by greeting -- which it did, on a live call.
+    assert "Open the call" not in stage["content"]
+    assert "Greet them" not in stage["content"]
+    assert "already introduced yourself" in stage["content"]
     # The rest of the node still applies -- identity confirmation and its edges.
     assert "Available labels:" in stage["content"]
     assert "identity_confirmed" in stage["content"]

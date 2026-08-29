@@ -331,3 +331,29 @@ def test_a_terminal_stage_asks_for_no_transition_at_all():
     prompt = walker.stage_instructions()
     assert "SAME response as the tool call" not in prompt
     assert "end of the call" in prompt
+
+
+def test_both_link_tools_are_offered_at_every_stage():
+    """A customer asks a question when they think of it, not when the script
+    expects it.
+
+    On a live call the customer asked how to set up the UPI mandate during
+    reason_inquiry. send_mandate_link was only mentioned in ask_intent's
+    prompt, a stage the call had not reached, so the model had no legal move
+    and the conversation stalled.
+    """
+    walker = GraphWalker(DUNNING_FLOW, CONTEXT)
+    preamble = walker.preamble()
+    assert "send_mandate_link" in preamble
+    assert "send_payment_link" in preamble
+    assert "EVERY stage" in preamble
+
+
+def test_asking_what_to_do_is_a_way_out_of_reason_inquiry():
+    """That question had no matching edge, which is what left the model stuck."""
+    walker = GraphWalker(DUNNING_FLOW, CONTEXT)
+    walker.transition("identity_confirmed", utterance="haan ji")
+    walker.transition("acknowledged", utterance="accha")
+    assert walker.node.id == "reason_inquiry"
+    conditions = " ".join(e.condition for e in walker.node.edges)
+    assert "what they should do" in conditions

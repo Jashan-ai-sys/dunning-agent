@@ -124,6 +124,21 @@ def normalize_for_speech(text: str, language: str = "hi") -> str:
 #:
 #: What is left is what a listener says and a payer does not: a hum, an
 #: "अच्छा", a "बिल्कुल".
+#: Replaces the greet node's own prompt once we have spoken the greeting
+#: ourselves. It has to *replace* rather than precede it: "do not greet
+#: again" sitting above "Open the call. Greet them" is a contradiction, and
+#: the model resolves it by greeting -- which it did, on a live call. The
+#: node's edges are untouched, so identity confirmation and the
+#: wrong-number path work exactly as before.
+ALREADY_GREETED = (
+    "You have already introduced yourself and asked whether you are "
+    "speaking to the customer. They are answering that question now. Do "
+    "NOT greet, introduce yourself, or say the company name again. React "
+    "to what they say. Do not mention the failed payment until identity "
+    "is confirmed -- this is someone's billing information."
+)
+
+
 HINDI_CLIP_GROUPS = {
     "continue": ["हूँ।", "अच्छा।"],
     "affirm": ["बिल्कुल।", "समझा।"],
@@ -625,10 +640,7 @@ class DunningSession:
                     "role": "user",
                     "content": (
                         f"[STAGE: {self.walker.node.id}]\n"
-                        "You have ALREADY greeted them and asked whether you "
-                        "are speaking to the customer. Do not greet again and "
-                        "do not introduce yourself again.\n\n"
-                        f"{self.walker.stage_instructions()}"
+                        f"{self.walker.stage_instructions(override_prompt=ALREADY_GREETED)}"
                     ),
                 }
                 break

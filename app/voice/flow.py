@@ -57,7 +57,18 @@ calm and offer to end the call.
 The call moves through stages, and you are told what to do at each one. Act on
 the MOST RECENT stage instruction you have been given -- including one that
 arrives as the result of the `transition` tool. A stage you have already left is
-finished: never repeat it, and never greet or introduce yourself twice."""
+finished: never repeat it, and never greet or introduce yourself twice.
+
+Two tools are available at EVERY stage, not only where a stage mentions them,
+because a customer asks a question when they think of it and not when the
+script expects it:
+
+* `send_payment_link` -- when they want to settle what is owed.
+* `send_mandate_link` -- when they ask how to restore auto-pay, re-authorise a
+  mandate, or set up UPI autopay again. Answer that question the moment it is
+  asked, whatever stage you are in, then carry on where you were.
+
+Never say a link has been sent unless the tool has told you it was."""
 )
 
 
@@ -157,8 +168,8 @@ REASON_INQUIRY = Node(
             to="ask_intent",
             label="reason_given",
             condition=(
-                "The customer gives any reason, says they do not know, or asks to get "
-                "on with it."
+                "The customer gives any reason, says they do not know, asks to get "
+                "on with it, or asks what they should do about it."
             ),
         ),
         Edge(

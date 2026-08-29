@@ -133,14 +133,25 @@ class GraphWalker:
         """
         return self.graph.render_preamble(self.context)
 
-    def stage_instructions(self) -> str:
+    def stage_instructions(self, *, override_prompt: str | None = None) -> str:
         """The half that changes: this node's prompt and its available moves.
 
         Append-only by design -- the caller adds this to the conversation
         rather than rewriting what came before, so the prefix keeps growing
         instead of shifting.
+
+        ``override_prompt`` replaces the node's own text while keeping its
+        edges. It exists for one case: when we have spoken a line the node
+        would otherwise have asked the model to produce. Negating the original
+        instead of replacing it does not work -- "do not greet again" directly
+        above "Open the call. Greet them" is a contradiction, and the model
+        resolves it by greeting. That happened on a live call.
         """
-        rendered = self.graph.render(self._node.id, self.context)
+        rendered = (
+            override_prompt
+            if override_prompt is not None
+            else self.graph.render(self._node.id, self.context)
+        )
         if self.finished:
             return f"{rendered}\n\nThis is the end of the call. Do not ask any further questions."
 
