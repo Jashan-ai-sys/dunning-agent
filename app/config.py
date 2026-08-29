@@ -262,6 +262,20 @@ class Settings(BaseSettings):
         return bool(self.livekit_url and self.livekit_api_key and self.livekit_api_secret)
 
     @property
+    def twilio_sms_configured(self) -> bool:
+        """Enough to send a text, which is less than enough to place a call.
+
+        Placing a call needs somewhere for Twilio to stream the audio to. An
+        SMS needs a sender and a credential. Conflating the two meant the voice
+        service -- which receives calls and therefore has no stream URL -- could
+        not send the mandate link, and failed at construction before it reached
+        the API.
+        """
+        return bool(
+            self.twilio_account_sid and self.twilio_auth_token and self.twilio_from_number
+        )
+
+    @property
     def twilio_configured(self) -> bool:
         return bool(
             self.twilio_account_sid

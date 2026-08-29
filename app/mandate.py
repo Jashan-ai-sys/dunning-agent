@@ -217,7 +217,12 @@ async def send_mandate_link(
 
 async def _default_sms(to: str, body: str) -> str | None:
     """Imported lazily: the telephony module pulls in Twilio settings that the
-    webhook service has no reason to load."""
-    from app.voice.telephony import TwilioChannel
+    webhook service has no reason to load.
 
-    return await TwilioChannel().send_sms(to, body)
+    The module function, not the channel. TwilioChannel refuses to construct
+    without a stream URL, which a service that only receives calls does not
+    have -- and sending a text does not need one.
+    """
+    from app.voice.telephony import send_sms
+
+    return await send_sms(to, body)

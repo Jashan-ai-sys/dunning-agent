@@ -5,10 +5,10 @@ steps:
       - -f
       - Dockerfile.voice
       - -t
-      - asia-south1-docker.pkg.dev/dunning-agent/cloud-run-source-deploy/dunning-voice:v8
+      - asia-south1-docker.pkg.dev/dunning-agent/cloud-run-source-deploy/dunning-voice:v9
       - .
 images:
-  - asia-south1-docker.pkg.dev/dunning-agent/cloud-run-source-deploy/dunning-voice:v8
+  - asia-south1-docker.pkg.dev/dunning-agent/cloud-run-source-deploy/dunning-voice:v9
 options:
   machineType: E2_HIGHCPU_8
 timeout: 1800s

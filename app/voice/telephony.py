@@ -143,34 +143,8 @@ class TwilioChannel:
         }
 
     async def send_sms(self, to: str, body: str) -> str | None:
-        """Send one SMS from the same Twilio number that places the calls.
-
-        Razorpay delivers payment links itself; there is no equivalent for a
-        subscription's authorisation link, so anything we want the customer to
-        receive mid-call has to go out over our own channel.
-
-        Returns the message sid, or None if it could not be sent. Never raises:
-        a failed SMS is not a reason to break a call that is going well, and
-        the agent has been told never to claim it sent something it did not.
-        """
-        url = f"{self._account_url}/Messages.json"
-        try:
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
-                response = await client.post(
-                    url,
-                    data={"To": to, "From": self._settings.twilio_from_number, "Body": body},
-                    auth=(
-                        self._settings.twilio_account_sid,
-                        self._settings.twilio_auth_token,
-                    ),
-                )
-            response.raise_for_status()
-        except Exception:  # noqa: BLE001 - never break a call over an SMS
-            logger.exception("could not send SMS to %s", to)
-            return None
-        sid = response.json().get("sid")
-        logger.info("sent SMS %s to %s", sid, to)
-        return sid
+        """Send one SMS from the number that places the calls."""
+        return await send_sms(to, body)
 
     async def hang_up(self, call_sid: str) -> None:
         """End a call in progress. Used when a recording answered."""
@@ -235,3 +209,44 @@ def stream_parameters(body: dict[str, Any]) -> dict[str, str]:
 
 
 __all__ = ["MAX_TWIML_CHARS", "TwilioChannel", "stream_parameters"]
+
+
+async def send_sms(to: str, body: str) -> str | None:
+    """Send one SMS, without needing everything a call needs.
+
+    Deliberately a module function rather than a TwilioChannel method. The
+    channel refuses to construct without ``twilio_stream_url`` -- the address
+    Twilio streams call audio to -- which is exactly right for placing a call
+    and irrelevant to sending a text. The voice service receives calls and so
+    has no stream URL, and building a channel to send the mandate link threw
+    before it reached the API. The customer was told a link was coming and
+    nothing was sent.
+
+    Returns the message sid, or None. Never raises: a failed SMS is not a
+    reason to break a call that is going well, and the agent has been told
+    never to claim it sent something it did not.
+    """
+    settings = get_settings()
+    if not settings.twilio_sms_configured:
+        logger.warning("cannot send SMS: Twilio sender is not configured")
+        return None
+
+    url = (
+        f"{settings.twilio_api_base}/Accounts/"
+        f"{settings.twilio_account_sid}/Messages.json"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                url,
+                data={"To": to, "From": settings.twilio_from_number, "Body": body},
+                auth=(settings.twilio_account_sid, settings.twilio_auth_token),
+            )
+        response.raise_for_status()
+    except Exception:  # noqa: BLE001 - never break a call over an SMS
+        logger.exception("could not send SMS to %s", to)
+        return None
+
+    sid = response.json().get("sid")
+    logger.info("sent SMS %s to %s", sid, to)
+    return sid

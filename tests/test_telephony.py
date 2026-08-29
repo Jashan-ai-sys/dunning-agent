@@ -247,3 +247,54 @@ def test_amd_can_be_switched_off_outright():
         twilio_amd_callback_url="https://example.invalid/amd",
     )
     assert channel._machine_detection() == {}
+
+
+# --- sending a text is not placing a call -----------------------------------
+
+
+def test_sending_a_text_does_not_need_a_stream_url():
+    """The bug this separates.
+
+    TwilioChannel refuses to construct without twilio_stream_url -- the address
+    Twilio streams call audio to. That is right for placing a call and
+    irrelevant to sending one SMS. The voice service receives calls, so it has
+    no stream URL, and building a channel to send the mandate link threw before
+    it reached the API: the customer was told a link was coming and nothing
+    was sent.
+    """
+    sms_only = Settings(
+        twilio_account_sid="AC1", twilio_auth_token="t", twilio_from_number="+1",
+        twilio_stream_url="",
+    )
+    assert sms_only.twilio_sms_configured is True
+    assert sms_only.twilio_configured is False, "still cannot place a call"
+
+
+def test_placing_a_call_still_needs_everything():
+    full = Settings(
+        twilio_account_sid="AC1", twilio_auth_token="t", twilio_from_number="+1",
+        twilio_stream_url="wss://x/ws",
+    )
+    assert full.twilio_configured is True
+    assert full.twilio_sms_configured is True
+
+
+@pytest.mark.parametrize(
+    "missing", ["twilio_account_sid", "twilio_auth_token", "twilio_from_number"]
+)
+def test_an_incomplete_sender_cannot_send(missing):
+    kwargs = {
+        "twilio_account_sid": "AC1",
+        "twilio_auth_token": "t",
+        "twilio_from_number": "+1",
+        missing: "",
+    }
+    assert Settings(**kwargs).twilio_sms_configured is False
+
+
+async def test_an_unconfigured_sender_returns_none_rather_than_raising(monkeypatch):
+    """A failed SMS must not break a call that is going well."""
+    from app.voice import telephony
+
+    monkeypatch.setattr(telephony, "get_settings", lambda: Settings())
+    assert await telephony.send_sms("+919000000000", "hi") is None
