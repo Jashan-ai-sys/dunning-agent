@@ -115,13 +115,22 @@ def normalize_for_speech(text: str, language: str = "hi") -> str:
 #: afford it: a 300ms clip with no context to recover in.
 #:
 #: Two clips minimum per group, or the same sound repeats and reads as a loop.
+#: Deliberately excludes "हाँ।", "जी।", "हाँ जी।" and "जी हाँ।".
+#:
+#: They are the four most common things an Indian customer says on a call, so
+#: hearing one back half a second later does not read as listening -- it reads
+#: as the agent parroting. That happened on a live call: the customer said
+#: "हाँ जी" and the agent said "हाँ जी" straight back.
+#:
+#: What is left is what a listener says and a payer does not: a hum, an
+#: "अच्छा", a "बिल्कुल".
 HINDI_CLIP_GROUPS = {
-    "continue": ["हूँ।", "जी।", "अच्छा।", "हाँ।"],
-    "affirm": ["जी हाँ।", "हाँ जी।", "बिल्कुल।"],
+    "continue": ["हूँ।", "अच्छा।"],
+    "affirm": ["बिल्कुल।", "समझा।"],
     # No trailing ellipsis on "अच्छा": Cartesia renders the pause literally and
     # returned a 1.5s clip, three times the others. A backchannel that long
     # stops being a murmur underneath the customer and starts interrupting.
-    "thinking": ["हम्म।", "जी...", "अच्छा"],
+    "thinking": ["हम्म।", "अच्छा"],
     "surprise": ["अच्छा?", "ओह।", "अरे।"],
 }
 
@@ -187,6 +196,18 @@ def build_backchannel(language: str) -> Backchannel:
             # for money they have already failed to pay.
             fire_probability=0.5,
             cooldown_s=3.5,
+            # A backchannel belongs *underneath* someone who is still talking.
+            # The library fires after its own VAD sees a pause, so a long
+            # stop makes it land once they have finished -- which is a reply,
+            # not a murmur, and is what made it sound like the agent was
+            # answering rather than listening. A very short stop puts it in the
+            # breath mid-sentence instead.
+            vad_stop_secs=0.05,
+            # And never on a short utterance. "हाँ जी" is half a second long
+            # and complete; there is no sentence to murmur underneath, so
+            # anything we say there is a response. Only speak while somebody is
+            # actually explaining something.
+            min_speech_before_eligible_s=1.5,
         ),
         # Below the default: a backchannel belongs underneath the person who
         # still has the floor, and on a phone leg it competes with their voice.
@@ -583,12 +604,35 @@ class DunningSession:
             return None
         return greeting_for(self.language, self.walker.context)
 
-    def note_assistant_said(self, text: str) -> None:
-        """Record a line we spoke without asking the model for it.
+    def note_greeting_spoken(self, text: str) -> None:
+        """Record a greeting we spoke without asking the model for it.
 
-        Without this the model does not know it has already greeted, and opens
-        its next turn by greeting again -- a bug this repo has fixed once.
+        Recording it as an assistant turn is necessary and not sufficient. The
+        greet node's instruction still reads "Open the call. Greet them" -- so
+        the model, doing exactly what it is told, greets a second time. That is
+        not a hypothetical: it happened on a live call, and the customer heard
+        the introduction twice.
+
+        So the stage directive is rewritten too. The node still owns identity
+        confirmation and the edges out of it; only the part that has already
+        happened is struck out.
         """
+        messages = self.llm_context.get_messages()
+        for i, message in enumerate(messages):
+            content = message.get("content")
+            if isinstance(content, str) and content.startswith("[STAGE: "):
+                messages[i] = {
+                    "role": "user",
+                    "content": (
+                        f"[STAGE: {self.walker.node.id}]\n"
+                        "You have ALREADY greeted them and asked whether you "
+                        "are speaking to the customer. Do not greet again and "
+                        "do not introduce yourself again.\n\n"
+                        f"{self.walker.stage_instructions()}"
+                    ),
+                }
+                break
+        self.llm_context.set_messages(messages)
         self.llm_context.add_message({"role": "assistant", "content": text})
 
     def _model_spoke_this_turn(self) -> bool:
@@ -872,7 +916,7 @@ async def _run_pipeline(session, transport, stt, llm, tts, aggregators) -> Dunni
         # Speak it directly and record it as ours. No LLM turn: there is no
         # customer input yet to reason about, and the round trip is half a
         # second of silence at the moment they have just said hello.
-        session.note_assistant_said(opening)
+        session.note_greeting_spoken(opening)
         logger.info("opened with the rendered greeting")
         await task.queue_frames([TTSSpeakFrame(opening)])
 

@@ -22,6 +22,7 @@ from app.voice.pipecat_agent import (
     TRANSPORT_PARAMS,
     DunningSession,
     SpokenFormFilter,
+    build_backchannel,
     build_services,
     build_turn_strategies,
     build_vad,
@@ -327,3 +328,33 @@ def test_the_transcript_is_evidence_not_context():
     assert "instructions" not in transcript
     assert "user: हाँ जी, आशा बोल रही हूँ" in transcript
     assert "assistant: धन्यवाद" in transcript
+
+
+def test_no_clip_is_something_a_customer_would_say():
+    """The parrot bug, caught on a live call.
+
+    The customer said "हाँ जी" and heard "हाँ जी" back half a second later. It
+    was not the model repeating them -- it was the backchannel, whose clip
+    library happened to contain the four most common acknowledgements an
+    Indian customer uses. A listening noise has to be something a listener
+    says and a payer does not.
+    """
+    customer_words = {"हाँ।", "जी।", "हाँ जी।", "जी हाँ।", "हाँ", "जी"}
+    for group, clips in HINDI_CLIP_GROUPS.items():
+        for clip in clips:
+            assert clip not in customer_words, f"{group}: {clip} is what they say to us"
+
+
+def test_the_backchannel_will_not_fire_on_a_short_utterance():
+    """"हाँ जी" is half a second and complete. There is no sentence to murmur
+    underneath, so anything said there is a reply, not a backchannel."""
+    backchannel = build_backchannel("hi")
+    assert backchannel._params.min_speech_before_eligible_s >= 1.0
+
+
+def test_the_backchannel_lands_mid_sentence_not_after_the_pause():
+    """It fires on its own VAD seeing a stop. A long stop puts the clip after
+    the customer has finished, which is a reply; a short one puts it in the
+    breath while they are still going."""
+    backchannel = build_backchannel("hi")
+    assert backchannel._params.vad_stop_secs <= 0.1

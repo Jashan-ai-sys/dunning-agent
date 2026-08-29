@@ -45,3 +45,47 @@ def test_every_language_asks_who_it_is_speaking_to():
         line = greeting_for(language, CONTEXT)
         assert "Asha Rao" in line
         assert line.strip().endswith("?"), f"{language}: {line}"
+
+
+# --- the re-greeting regression --------------------------------------------
+
+
+def test_speaking_the_greeting_strikes_the_instruction_to_greet():
+    """The bug this fixes, caught on a live call.
+
+    Recording the greeting as an assistant turn is necessary and not
+    sufficient: the greet node still says "Open the call. Greet them", so the
+    model does exactly that a second time and the customer hears the
+    introduction twice.
+    """
+    from app.voice.flow import DUNNING_FLOW
+    from app.voice.pipecat_agent import DunningSession
+
+    session = DunningSession(
+        {
+            "customer_name": "Asha Rao",
+            "company_name": "Acme",
+            "amount_spoken": "499 रुपये",
+            "failure_reason": "test",
+            "suggested_route": "test route",
+            "halt_note": "",
+            "language_hint": "",
+            "_language": "hi",
+        }
+    )
+    opening = session.opening_line()
+    assert opening is not None
+
+    session.note_greeting_spoken(opening)
+    messages = session.llm_context.get_messages()
+    stage = next(m for m in messages if str(m.get("content", "")).startswith("[STAGE: "))
+
+    assert "ALREADY greeted" in stage["content"]
+    # The rest of the node still applies -- identity confirmation and its edges.
+    assert "Available labels:" in stage["content"]
+    assert "identity_confirmed" in stage["content"]
+    # And the line we spoke is on the record as ours.
+    assert any(
+        m.get("role") == "assistant" and m.get("content") == opening for m in messages
+    )
+    assert DUNNING_FLOW is not None
