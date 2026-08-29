@@ -317,6 +317,46 @@ def test_the_stage_prompt_asks_for_speech_and_the_tool_call_together():
     assert "Available labels:" in prompt
 
 
+def test_the_stage_prompt_says_a_tool_call_is_not_a_transition():
+    """Both stalls we have seen on live calls were the model doing the work of
+    an outcome and stopping there.
+
+    At `explain` it kept talking; at `ask_intent` it sent the payment link, said
+    so, and never transitioned. Both calls ended `unclear` -- no intent recorded
+    for a customer who had agreed to pay.
+    """
+    walker = GraphWalker(DUNNING_FLOW, CONTEXT)
+    assert "not a substitute" in walker.stage_instructions()
+
+
+def test_the_moves_are_only_the_ones_legal_here():
+    """What a rejected transition hands back. It must carry the labels without
+    the node's prompt: that opens with the line the model has already spoken."""
+    walker = GraphWalker(DUNNING_FLOW, CONTEXT)
+    walker.transition("identity_confirmed", utterance="yes")
+
+    moves = walker.moves()
+
+    assert "acknowledged" in moves
+    assert "disputes_charge" in moves
+    assert "pay_now" not in moves
+    assert walker.graph.render("explain", walker.context) not in moves
+
+
+def test_sending_a_link_is_not_where_the_intent_stage_ends():
+    """`ask_intent` tells the model to send the link and wait for the result.
+    Satisfying that felt like finishing the step, so it stopped there."""
+    walker = GraphWalker(DUNNING_FLOW, CONTEXT)
+    for label in ("identity_confirmed", "acknowledged", "reason_given"):
+        walker.transition(label, utterance="x")
+    assert walker.node.id == "ask_intent"
+
+    prompt = walker.stage_instructions()
+
+    assert "send_payment_link" in prompt
+    assert "`transition` with `pay_now`" in prompt
+
+
 def test_a_terminal_stage_asks_for_no_transition_at_all():
     """Nothing left to batch once the call is over."""
     walker = GraphWalker(DUNNING_FLOW, CONTEXT)

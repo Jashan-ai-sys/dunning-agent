@@ -208,7 +208,10 @@ ASK_INTENT = Node(
         "right on one call.\n\n"
         "If they agree to pay now, call the `send_payment_link` tool FIRST and "
         "wait for its result. Only say the link has been sent once that tool "
-        "confirms it. Never promise a link you have not actually sent."
+        "confirms it. Never promise a link you have not actually sent. Then "
+        "call `transition` with `pay_now`: sending a link is not the same as "
+        "recording that they agreed to pay, and a call that ends here counts "
+        "as one where nobody found out what the customer wanted."
     ),
     extracts=("preferred_time",),
     edges=(
