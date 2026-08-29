@@ -108,6 +108,38 @@ class Settings(BaseSettings):
     worker_interval_seconds: int = 60
     worker_batch_size: int = 50
 
+    # --- Sarvam server-side VAD (saaras:v3 only) ---
+    #
+    # Distinct from the Silero settings below. Silero decides whether we are
+    # listening; these decide whether Sarvam turns what it hears into words.
+    # Both matter, because a barge-in needs BOTH: Silero must open the turn and
+    # the audio must transcribe into enough words to pass min_words.
+    #
+    # Every one is None by default, meaning Sarvam's own default applies. They
+    # are exposed as settings rather than constants because the right values
+    # depend on the line -- a call from a shop is not a call from an office --
+    # and finding them means changing a number and listening, not redeploying.
+    #
+    # high_vad_sensitivity is the blunt version of all of these. Keeping it on
+    # while raising the floors below is deliberate: hear the quiet customer,
+    # ignore the quiet background.
+    #
+    # Volume (dB) below which audio is too quiet to be speech. The most direct
+    # answer to a television in the next room.
+    sarvam_start_speech_volume_threshold: float | None = None
+    # Consecutive speech frames needed to open a segment. Raise it and a short
+    # burst -- a cough, a door -- never becomes a word.
+    sarvam_min_speech_frames: int | None = None
+    # The same, for registering a barge-in specifically.
+    sarvam_interrupt_min_speech_frames: int | None = None
+    # VAD probability (0-1) above which a frame counts as speech. Raise to make
+    # Sarvam more certain before it commits.
+    sarvam_positive_speech_threshold: float | None = None
+    sarvam_negative_speech_threshold: float | None = None
+    # Frames prepended before detected onset -- recovers a clipped first
+    # syllable, which is what a raised threshold tends to cost.
+    sarvam_pre_speech_pad_frames: int | None = None
+
     # --- Turn detection (VAD) ---
     # Values from the Blostem production telephony backend, whose comments carry
     # the reasoning. They tuned against 8 kHz mu-law with background noise; a

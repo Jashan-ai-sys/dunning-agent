@@ -332,6 +332,34 @@ def build_llm(system_instruction: str | None = None):
     )
 
 
+def sarvam_vad_overrides(settings) -> dict:
+    """The saaras:v3 VAD parameters we have chosen to set, and only those.
+
+    Unset means Sarvam's default, which is not the same as any value we could
+    pick -- passing a guess for a parameter we have no opinion on would replace
+    a tuned default with an untuned one. So only what is configured is sent.
+
+    These are the fine-grained version of ``high_vad_sensitivity``. Both are
+    used together on purpose: the flag makes Sarvam listen harder, and these
+    put floors under what it is allowed to hear as speech. The failure they
+    exist to fix is background noise arriving as three transcribed words, which
+    is enough to clear the barge-in threshold and take the floor from the
+    agent mid-sentence.
+    """
+    mapping = {
+        "start_speech_volume_threshold": settings.sarvam_start_speech_volume_threshold,
+        "min_speech_frames": settings.sarvam_min_speech_frames,
+        "interrupt_min_speech_frames": settings.sarvam_interrupt_min_speech_frames,
+        "positive_speech_threshold": settings.sarvam_positive_speech_threshold,
+        "negative_speech_threshold": settings.sarvam_negative_speech_threshold,
+        "pre_speech_pad_frames": settings.sarvam_pre_speech_pad_frames,
+    }
+    chosen = {k: v for k, v in mapping.items() if v is not None}
+    if chosen:
+        logger.info("sarvam VAD overrides: %s", chosen)
+    return chosen
+
+
 def build_services(language: str, system_instruction: str | None = None) -> tuple:
     """STT, LLM and TTS, configured exactly as the LiveKit path is."""
     settings = get_settings()
@@ -375,6 +403,7 @@ def build_services(language: str, system_instruction: str | None = None) -> tupl
             # Supported on saaras:v3, which is what resolve_sarvam_model()
             # actually returns here -- v4 is rejected by Pipecat 1.7.0.
             high_vad_sensitivity=True,
+            **sarvam_vad_overrides(settings),
         ),
         mode="transcribe",
     )
@@ -824,13 +853,26 @@ def context_from_body(body: dict) -> dict:
     return context
 
 
+#: Exactly the tools the model may call. Adding one here is not optional --
+#: an unlisted tool is refused at the point of use, after the model has
+#: already told the customer it is doing something.
+MCP_TOOLS = ["send_payment_link", "send_mandate_link", "get_case"]
+
+
 def recovery_mcp(recovery_case_id: int | None) -> MCPClient:
     """Our own MCP server, over stdio, bound to one case.
 
     Runs as a child process of the agent, so it shares the environment -- the
     same DATABASE_URL and Razorpay keys -- without those ever crossing a
-    network. `tools_filter` is explicit: the LLM gets exactly these two and
-    nothing a future tool might add by accident.
+    network. `tools_filter` is explicit: the LLM gets exactly these and nothing
+    a future tool might add by accident.
+
+    That guard has already caught something, at the cost of a live call. A
+    fourth tool was added and the flow was told to use it, but this list was
+    not updated -- so Pipecat refused the call with "not in the currently
+    advertised tool set" and the customer was told about a link that was never
+    sent. `test_every_tool_the_flow_asks_for_is_advertised` now fails if the
+    two ever drift apart again.
 
     The case travels in that environment rather than as a tool argument. When
     it was an argument the model had to supply an integer nobody had told it,
@@ -856,7 +898,7 @@ def recovery_mcp(recovery_case_id: int | None) -> MCPClient:
             args=["-m", "app.mcp_server"],
             env=env,
         ),
-        tools_filter=["send_payment_link", "get_case"],
+        tools_filter=MCP_TOOLS,
     )
 
 

@@ -358,3 +358,93 @@ def test_the_backchannel_lands_mid_sentence_not_after_the_pause():
     breath while they are still going."""
     backchannel = build_backchannel("hi")
     assert backchannel._params.vad_stop_secs <= 0.1
+
+
+def test_every_tool_the_flow_asks_for_is_advertised():
+    """The drift that cost a live call.
+
+    A fourth tool was added and the flow was told to use it, but the MCP
+    allow-list was not updated. Pipecat refused the call -- "not in the
+    currently advertised tool set" -- after the model had already told the
+    customer it was sending a link. The filter is a real safety mechanism and
+    it worked; what was missing was anything to notice the two had diverged.
+    """
+    import re
+
+    from app.voice.flow import DUNNING_FLOW, SYSTEM_STYLE
+    from app.voice.pipecat_agent import MCP_TOOLS
+
+    prompts = SYSTEM_STYLE + " ".join(
+        node.prompt or "" for node in DUNNING_FLOW.nodes
+    )
+    asked_for = {
+        name
+        for name in re.findall(r"`(\w+)`", prompts)
+        if name.startswith(("send_", "get_"))
+    }
+    assert asked_for, "no tools referenced -- the pattern stopped matching"
+
+    missing = asked_for - set(MCP_TOOLS)
+    assert not missing, f"the flow asks for {missing}, which the model cannot call"
+
+
+def test_the_transition_tool_is_not_in_the_mcp_list():
+    """`transition` stays in-process: it is graph traversal, not an external
+    capability, and it must not be able to fail over a transport."""
+    from app.voice.pipecat_agent import MCP_TOOLS
+
+    assert "transition" not in MCP_TOOLS
+
+
+# --- Sarvam server-side VAD tuning -----------------------------------------
+
+
+def test_nothing_is_sent_to_sarvam_unless_we_have_an_opinion():
+    from app.config import Settings
+    """Unset is not the same as any value we could pick. Passing a guess for a
+    parameter we have no view on replaces a tuned default with an untuned one."""
+    from app.voice.pipecat_agent import sarvam_vad_overrides
+
+    assert sarvam_vad_overrides(Settings()) == {}
+
+
+def test_only_the_configured_parameters_are_sent():
+    from app.config import Settings
+    from app.voice.pipecat_agent import sarvam_vad_overrides
+
+    overrides = sarvam_vad_overrides(
+        Settings(
+            sarvam_start_speech_volume_threshold=-35.0,
+            sarvam_min_speech_frames=4,
+        )
+    )
+    assert overrides == {
+        "start_speech_volume_threshold": -35.0,
+        "min_speech_frames": 4,
+    }
+
+
+def test_the_names_match_what_pipecat_accepts():
+    """A typo here is silent: pydantic settings objects drop unknown fields, so
+    the parameter would simply never reach Sarvam and the tuning would appear
+    to do nothing."""
+    import dataclasses
+
+    from pipecat.services.sarvam.stt import SarvamSTTSettings
+
+    from app.config import Settings
+    from app.voice.pipecat_agent import sarvam_vad_overrides
+
+    accepted = {f.name for f in dataclasses.fields(SarvamSTTSettings)}
+    ours = sarvam_vad_overrides(
+        Settings(
+            sarvam_start_speech_volume_threshold=-35.0,
+            sarvam_min_speech_frames=4,
+            sarvam_interrupt_min_speech_frames=6,
+            sarvam_positive_speech_threshold=0.6,
+            sarvam_negative_speech_threshold=0.3,
+            sarvam_pre_speech_pad_frames=2,
+        )
+    )
+    unknown = set(ours) - accepted
+    assert not unknown, f"pipecat would silently drop {unknown}"
