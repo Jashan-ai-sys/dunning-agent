@@ -529,6 +529,9 @@ class DunningSession:
         self.voice_call_id: int | None = None
         self.started_at = utcnow()
         self._finalised = False
+        #: Errors raised by the TTS service -- lines the agent believes it
+        #: delivered and the customer never heard. See `note_tts_failure`.
+        self.tts_failures: list[str] = []
         #: Set once the pipeline is built; None on the paths that run without one.
         self.backchannel_gate: BackchannelProcessor | None = None
 
@@ -648,6 +651,17 @@ class DunningSession:
             return None
         return greeting_for(self.language, self.walker.context)
 
+    def note_tts_failure(self, error: str) -> None:
+        """Record that a line the agent 'said' never reached the customer.
+
+        Only the first is logged. A quota that has run out fails every
+        utterance for the rest of the call, and twenty identical lines buries
+        the one that matters.
+        """
+        if not self.tts_failures:
+            logger.error("nothing the agent says is being heard: %s", error)
+        self.tts_failures.append(error)
+
     def note_greeting_spoken(self, text: str) -> None:
         """Record a greeting we spoke without asking the model for it.
 
@@ -748,16 +762,47 @@ class DunningSession:
             return
         self._finalised = True
 
+        intent = self.walker.intent or CallIntent.UNCLEAR
+        status = CallStatus.COMPLETED
+        error = None
+        if self.tts_failures:
+            # The customer answered questions they never heard. Everything
+            # downstream of them kept working -- the model spoke into the void,
+            # the graph advanced on their replies, and the walker arrived at an
+            # intent with the same confidence as a call that went perfectly.
+            #
+            # That confidence is the danger, and it is why TTS is singled out.
+            # An STT or LLM failure is silence in both directions: the graph
+            # does not advance and the intent stays unclear on its own. Only a
+            # mute agent produces a *wrong* answer rather than no answer, and
+            # `declined` or `dispute` would suppress this customer for good.
+            #
+            # So the intent is discarded rather than trusted. Unclear leaves
+            # the case open for another attempt, bounded by the attempt cap:
+            # the cost of being wrong here is one more call, against never
+            # calling someone who never heard us ask.
+            logger.error(
+                "discarding intent '%s' from call %s: %d line(s) never reached "
+                "the customer",
+                intent,
+                self.voice_call_id,
+                len(self.tts_failures),
+            )
+            intent = CallIntent.UNCLEAR
+            status = CallStatus.FAILED
+            error = f"{len(self.tts_failures)} TTS failures; first: {self.tts_failures[0]}"
+
         await finalise_call(
             voice_call_id=self.voice_call_id,
             recovery_case_id=self.recovery_case_id,
             result=CallResult(
-                intent=self.walker.intent or CallIntent.UNCLEAR,
-                status=CallStatus.COMPLETED,
+                intent=intent,
+                status=status,
                 final_node_id=self.walker.node.id,
                 transcript=self._transcript(),
                 duration_seconds=await duration_since(self.started_at),
                 answered_at=self.started_at,
+                error=error,
                 transitions=self.walker.observations_as_dicts(),
             ),
         )
@@ -902,6 +947,19 @@ def recovery_mcp(recovery_case_id: int | None) -> MCPClient:
     )
 
 
+def watch_tts_failures(tts, session: DunningSession) -> None:
+    """Tell the session when a line never reached the customer.
+
+    Bound to the TTS service's own `on_error` rather than the task's
+    `on_pipeline_error`, which carries every processor's errors and would have
+    to pick this one out by identity.
+    """
+
+    @tts.event_handler("on_error")
+    async def _on_tts_error(_service, frame) -> None:
+        session.note_tts_failure(str(frame.error))
+
+
 async def run_call(transport, session: DunningSession) -> DunningSession:
     """Wire and run one conversation. Returns the session for its outcome."""
     # The preamble is fixed for the whole call, so it is handed to the service
@@ -958,6 +1016,8 @@ async def _run_pipeline(session, transport, stt, llm, tts, aggregators) -> Dunni
     session.apply_backchannel_policy()
 
     pipeline = Pipeline(processors)
+
+    watch_tts_failures(tts, session)
 
     task = PipelineTask(pipeline, params=PipelineParams(enable_metrics=True))
 

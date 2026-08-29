@@ -12,10 +12,14 @@ would start, sound configured, and never detect a turn.
 """
 
 
-import pytest
+import logging
 
+import pytest
+from pipecat.frames.frames import ErrorFrame
+
+from app.constants import CallStatus
 from app.voice.flow import halt_note
-from app.voice.intents import CallIntent
+from app.voice.intents import CallIntent, outcome_for
 from app.voice.pipecat_agent import (
     HINDI_CLIP_GROUPS,
     SILENT_NODES,
@@ -28,6 +32,7 @@ from app.voice.pipecat_agent import (
     build_vad,
     context_from_body,
     normalize_for_speech,
+    watch_tts_failures,
 )
 
 BODY = {
@@ -233,6 +238,107 @@ async def test_an_abandoned_call_records_unclear(monkeypatch):
 
     assert calls[0]["result"].intent == CallIntent.UNCLEAR
     assert calls[0]["result"].final_node_id == "greet"
+
+
+# --- a mute agent ---------------------------------------------------------
+
+
+async def _finalise_with_tts_failures(monkeypatch, failures: list[str], label: str):
+    calls = []
+
+    async def fake_finalise_call(**kwargs):
+        calls.append(kwargs)
+
+    monkeypatch.setattr("app.voice.pipecat_agent.finalise_call", fake_finalise_call)
+
+    session = DunningSession(context_from_body(BODY))
+    session.walker.transition("identity_confirmed")
+    session.walker.transition("acknowledged")
+    session.walker.transition("reason_given")
+    session.walker.transition(label)
+    for failure in failures:
+        session.note_tts_failure(failure)
+
+    await session.finalise()
+    return calls[0]["result"]
+
+
+async def test_a_call_the_customer_could_not_hear_records_no_intent(monkeypatch):
+    """The customer answered questions that were never spoken.
+
+    Cartesia ran out of credits mid-call. Nothing else broke: the model kept
+    generating, the graph kept advancing on the customer's replies, and the
+    walker arrived at `pay_now` from a conversation that only one side heard.
+    """
+    result = await _finalise_with_tts_failures(
+        monkeypatch, ["quota_exceeded: 2 credits remaining"], "pay_now"
+    )
+
+    assert result.intent == CallIntent.UNCLEAR
+    assert result.status == CallStatus.FAILED
+    assert "quota_exceeded" in result.error
+
+
+async def test_a_mute_call_never_suppresses_the_customer(monkeypatch):
+    """The reason this is worth a test of its own.
+
+    `declined` bans the person from every future call. Reaching it because
+    they heard silence and gave up would end the relationship over our own
+    outage, and nothing downstream would ever question it.
+    """
+    result = await _finalise_with_tts_failures(monkeypatch, ["quota_exceeded"], "declined")
+
+    assert result.intent == CallIntent.UNCLEAR
+    assert not outcome_for(result.intent).suppress_contact
+
+
+async def test_the_node_reached_is_still_recorded(monkeypatch):
+    """The intent is discarded; the evidence is not. Without the node and the
+    transcript there is no way to tell this call from one nobody answered."""
+    result = await _finalise_with_tts_failures(monkeypatch, ["quota_exceeded"], "pay_now")
+
+    assert result.final_node_id == "pay_now"
+    assert result.transitions
+
+
+async def test_a_call_that_was_heard_keeps_its_intent(monkeypatch):
+    """The guard must not fire on every call -- that would be an outage of
+    its own, silently retrying customers who already agreed to pay."""
+    result = await _finalise_with_tts_failures(monkeypatch, [], "pay_now")
+
+    assert result.intent == CallIntent.RETRY_NOW
+    assert result.status == CallStatus.COMPLETED
+    assert result.error is None
+
+
+async def test_the_real_tts_service_reports_its_failures():
+    """The event name has to be the one Pipecat actually raises.
+
+    Everything else here is exercised by calling `note_tts_failure` directly,
+    which proves nothing about the wiring. This drives a real
+    `CartesiaTTSService` through its own event machinery: get the name wrong
+    and the guard is dead code that reports every mute call as a success.
+    """
+    _, _, tts = build_services("hi")
+    session = DunningSession(context_from_body(BODY))
+    watch_tts_failures(tts, session)
+
+    await tts.push_error_frame(ErrorFrame(error="quota_exceeded"))
+
+    assert session.tts_failures == ["quota_exceeded"]
+
+
+def test_only_the_first_silent_line_is_logged(caplog):
+    """A spent quota fails every utterance for the rest of the call. Twenty
+    identical lines bury the one that explains the outage."""
+    session = DunningSession(context_from_body(BODY))
+
+    with caplog.at_level(logging.ERROR, logger="app.voice.pipecat_agent"):
+        for _ in range(5):
+            session.note_tts_failure("quota_exceeded")
+
+    assert len(session.tts_failures) == 5
+    assert sum("nothing the agent says" in r.message for r in caplog.records) == 1
 
 
 # --- turn-taking ---------------------------------------------------------
