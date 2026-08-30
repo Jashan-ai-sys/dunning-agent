@@ -52,6 +52,14 @@ dev = [
     "ruff>=0.8",
 ]
 
+# Serving the voice models on our own GPU instead of three vendors' APIs.
+# Only the client lives here -- vLLM and the models are installed into the
+# Modal image (see scripts/modal_llm.py), never onto a developer machine.
+local = [
+    "modal>=0.64",
+    "openai>=1.40",
+]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]

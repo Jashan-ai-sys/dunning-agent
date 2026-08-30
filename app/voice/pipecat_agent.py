@@ -67,6 +67,7 @@ from app.voice.flow import DUNNING_FLOW, greeting_for, halt_note, language_hint
 from app.voice.graph import NodeKind
 from app.voice.instrumentation import TimedSileroVAD, TimedSmartTurnAnalyzer
 from app.voice.intents import CallIntent
+from app.voice.local_services import LocalSTTService, LocalTTSService
 from app.voice.normalizers import (
     normalize_amounts_for_tts,
     normalize_for_hindi_tts,
@@ -303,6 +304,33 @@ def build_llm(system_instruction: str | None = None):
     """
     settings = get_settings()
 
+    if settings.llm_provider == "local":
+        # Reuses the switch the LiveKit path already had -- `llm_provider` plus
+        # the three `local_llm_*` values -- rather than a second one meaning the
+        # same thing. Adding a parallel setting shadowed `local_llm_model` and
+        # silently pointed `agent.py` at a model name its own base URL did not
+        # serve, which is the failure mode duplicated configuration always has.
+        #
+        # Any OpenAI-compatible server works; vLLM and SGLang both expose one.
+        # `system_instruction` becomes an ordinary system message on this path
+        # (see DunningSession.__init__), because that is how the OpenAI shape
+        # carries it -- Gemini's separate field is a Gemini nicety.
+        from pipecat.services.openai.llm import OpenAILLMService
+
+        logger.info(
+            "using the local LLM at %s (%s)",
+            settings.local_llm_base_url,
+            settings.local_llm_model,
+        )
+        return OpenAILLMService(
+            api_key=settings.local_llm_api_key,
+            base_url=settings.local_llm_base_url,
+            settings=OpenAILLMService.Settings(
+                model=settings.local_llm_model,
+                temperature=settings.llm_temperature,
+            ),
+        )
+
     if not settings.google_use_vertex:
         return GoogleLLMService(
             api_key=os.environ["GOOGLE_API_KEY"],
@@ -364,6 +392,9 @@ def build_services(language: str, system_instruction: str | None = None) -> tupl
     """STT, LLM and TTS, configured exactly as the LiveKit path is."""
     settings = get_settings()
 
+    if settings.local_speech_url.strip():
+        return build_local_services(language, system_instruction)
+
     stt = SarvamSTTService(
         api_key=os.environ["SARVAM_API_KEY"],
         # 16 kHz: Sarvam performs best there, and native 8 kHz telephony audio
@@ -418,6 +449,44 @@ def build_services(language: str, system_instruction: str | None = None) -> tupl
             # so this has to match what the normalizers produce.
             language="hi" if language != "en" else "en",
         ),
+        text_filters=[SpokenFormFilter(language)],
+    )
+    return stt, llm, tts
+
+
+def build_local_services(language: str, system_instruction: str | None = None) -> tuple:
+    """The same three services, served from our own GPU.
+
+    Selected by setting `LOCAL_SPEECH_URL`; unset, nothing here runs and the
+    vendor path above is untouched. That is the point of the switch being one
+    branch in one function: the local stack is a deployment choice, not a fork
+    of the agent, and everything above -- graph, walker, policy, outcome -- is
+    identical either way.
+
+    The LLM is deliberately still `build_llm`. Pointing it at the local Gemma
+    is a `base_url` change inside that function, and doing it here would put
+    two independent swaps behind one flag: if a call then went wrong there
+    would be no way to tell which half did it.
+
+    The same spoken-form filter is applied. Those rewrites turn digits and
+    times into the words a Hindi speaker actually says, and they are a property
+    of the language rather than of the vendor -- VoxCPM needs them exactly as
+    much as Cartesia did.
+    """
+    settings = get_settings()
+    base_url = settings.local_speech_url.strip()
+    logger.info("using the local speech stack at %s", base_url)
+
+    stt = LocalSTTService(
+        base_url=base_url,
+        language=language,
+        # 16 kHz for the same reason Sarvam gets it: native 8 kHz telephony
+        # audio starves an Indic model and the Hindi comes back garbled.
+        sample_rate=16_000,
+    )
+    llm = build_llm(system_instruction)
+    tts = LocalTTSService(
+        base_url=base_url,
         text_filters=[SpokenFormFilter(language)],
     )
     return stt, llm, tts
@@ -519,11 +588,19 @@ class DunningSession:
         self.walker = GraphWalker(DUNNING_FLOW, context)
         self.language = context.get("_language", "hi")
         self.llm_context = LLMContext()
-        # No system message here on purpose: the preamble goes to the service as
-        # `system_instruction` (see build_llm), and Gemini would ignore a second
-        # one anyway. The context holds only the conversation, which is what
-        # makes it append-only and therefore cacheable.
-        self.llm_context.set_messages([self._stage_message()])
+        # No system message here on the Gemini path: the preamble goes to the
+        # service as `system_instruction` (see build_llm), and Gemini would
+        # ignore a second one anyway. The context holds only the conversation,
+        # which is what makes it append-only and therefore cacheable.
+        #
+        # The local path has no such field. vLLM speaks the OpenAI shape, where
+        # the system prompt is simply the first message -- so it goes in here
+        # instead. Still append-only, still cacheable; only the carrier differs.
+        opening: list[dict] = []
+        if get_settings().llm_provider == "local":
+            opening.append({"role": "system", "content": self.walker.preamble()})
+        opening.append(self._stage_message())
+        self.llm_context.set_messages(opening)
         self.finished = asyncio.Event()
         self.recovery_case_id: int | None = context.get("_recovery_case_id")
         self.voice_call_id: int | None = None
@@ -713,17 +790,32 @@ class DunningSession:
         self.tts_failures.append(error)
 
     def note_greeting_spoken(self, text: str) -> None:
-        """Record a greeting we spoke without asking the model for it.
+        """Strike out the part of the greet node we have already performed.
 
-        Recording it as an assistant turn is necessary and not sufficient. The
-        greet node's instruction still reads "Open the call. Greet them" -- so
-        the model, doing exactly what it is told, greets a second time. That is
-        not a hypothetical: it happened on a live call, and the customer heard
-        the introduction twice.
+        The node's instruction reads "Open the call. Greet them" -- so the
+        model, doing exactly what it is told, greets a second time. That is not
+        a hypothetical: it happened on a live call and the customer heard the
+        introduction twice. Negating it does not work either; "do not greet
+        again" directly above "Open the call. Greet them" is a contradiction,
+        and the model resolves it by greeting. So the directive is replaced.
 
-        So the stage directive is rewritten too. The node still owns identity
-        confirmation and the edges out of it; only the part that has already
-        happened is struck out.
+        Deliberately does NOT add the greeting to the context as an assistant
+        turn, which is what it used to do. The greeting is spoken by pushing a
+        ``TTSSpeakFrame`` through the pipeline, and ``aggregators.assistant()``
+        sits at the end of that pipeline -- so it records the line on its way
+        past, exactly as it records anything else the bot says. Writing it here
+        as well put the greeting in the context twice.
+
+        The customer never heard it twice; the model did. On a live call the
+        second copy landed *after* the customer's reply, so the history the
+        model reasoned from showed it repeating itself the moment someone
+        answered -- which is not a habit worth teaching it, on a call whose
+        next job is to discuss the customer's money.
+
+        The gap this leaves is the turn between the greeting being spoken and
+        the aggregator committing it. ``ALREADY_GREETED`` covers exactly that:
+        it states outright that the introduction has happened, so a model that
+        cannot yet see the line in its history is still told not to repeat it.
         """
         messages = self.llm_context.get_messages()
         for i, message in enumerate(messages):
@@ -738,7 +830,6 @@ class DunningSession:
                 }
                 break
         self.llm_context.set_messages(messages)
-        self.llm_context.add_message({"role": "assistant", "content": text})
 
     def _model_spoke_this_turn(self) -> bool:
         """Did the model produce speech in the same response as the tool call?

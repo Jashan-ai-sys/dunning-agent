@@ -253,6 +253,12 @@ class Settings(BaseSettings):
     # trained on Hinglish handles it better than a generic Hindi or English one.
     # Alternatives: Kavita - Customer Care Agent 56e35e2d-6eb6-4226-ab8b-9776515a7094,
     # Devansh - Warm Support Agent 1259b7e3-cb8a-43df-9446-30971a46b8b0.
+    #: Base URL of the self-hosted STT/TTS service (scripts/modal_speech.py).
+    #: Empty means the vendor path: Sarvam for hearing, Cartesia for speaking.
+    #: Set it and both swap together, because they are one deployment -- a
+    #: call that heard locally and spoke through a vendor would tell us
+    #: nothing useful about either.
+    local_speech_url: str = ""
     cartesia_voice: str = "95d51f79-c397-46f9-b49a-23763d3eaa2d"
 
     log_level: str = "INFO"

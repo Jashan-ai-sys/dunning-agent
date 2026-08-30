@@ -89,8 +89,13 @@ def test_speaking_the_greeting_strikes_the_instruction_to_greet():
     # The rest of the node still applies -- identity confirmation and its edges.
     assert "Available labels:" in stage["content"]
     assert "identity_confirmed" in stage["content"]
-    # And the line we spoke is on the record as ours.
-    assert any(
+    # And we do NOT write the line into the context ourselves. It is spoken as
+    # a TTSSpeakFrame, and `aggregators.assistant()` sits at the end of the
+    # pipeline, so it records the greeting on its way past. Doing both put the
+    # greeting in twice -- and on a live call the second copy landed *after*
+    # the customer's reply, so the history showed the agent repeating itself
+    # the moment someone answered.
+    assert not any(
         m.get("role") == "assistant" and m.get("content") == opening for m in messages
     )
     assert DUNNING_FLOW is not None

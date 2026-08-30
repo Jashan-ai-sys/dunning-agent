@@ -137,6 +137,20 @@ async def get_case() -> dict:
     if recovery_case_id is None:
         return {"found": False}
 
+    try:
+        return await _load_case(recovery_case_id)
+    except Exception:  # noqa: BLE001 - never break a call, never leak internals
+        # The other two tools have always done this; this one did not, and the
+        # difference showed. An unguarded exception here does not end the call
+        # -- MCP catches it and returns isError -- but it hands the model the
+        # stringified database error as its guidance, on a call where the next
+        # thing it says is about somebody's money.
+        logger.exception("could not read case %s", recovery_case_id)
+        return {"found": False, "reason": "could not read the account just now"}
+
+
+async def _load_case(recovery_case_id: int) -> dict:
+    """The body of `get_case`, split out so the guard above stays readable."""
     async with SessionLocal() as session:
         case = await session.get(RecoveryCase, recovery_case_id)
         if case is None:
