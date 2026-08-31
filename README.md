@@ -5,16 +5,30 @@ Razorpay AI Buildathon — **Track 03: AI Revenue Recovery**.
 Detects subscription revenue at risk, decides on an intervention, and executes a
 bounded recovery workflow with stopping rules and a full audit trail.
 
-**Status: Phases 1, 2, 4 and 5 complete; Phase 3 built but unproven.** The
-trigger layer, policy engine, orchestrator, payment links and batch metrics are
-done, with the webhook service live on Cloud Run against Cloud SQL and the
-worker ticking every 5 minutes via Cloud Scheduler.
+**Status: end to end, on real phone calls.** The trigger layer, policy engine,
+orchestrator, payment links, mandate re-charging and batch metrics are live on
+Cloud Run against Cloud SQL, with the worker ticking every 5 minutes via Cloud
+Scheduler.
 
-The voice agent is written and unit-tested end to end, but **no call has ever
-been placed**: it needs a LiveKit SIP outbound trunk, which requires a telephony
-provider, and for Indian numbers DLT registration. Until then the orchestrator
-uses `LoggingChannel`, which records the intent to call and does not pretend one
-happened. See [Roadmap](#roadmap) and [Known gaps](#known-gaps).
+The voice agent places real calls over Twilio and holds the conversation in
+Hindi. A call walks the conversation graph, records a labelled transition at
+every turn, and writes a detected intent back onto the recovery case — the same
+`apply_call_result` path a simulated batch uses, so nothing about the outcome is
+special-cased for a live call.
+
+Measured on production calls, not a laptop:
+
+| | p50 |
+| ------------------------------- | ------ |
+| Customer stops speaking → agent replies | 0.512s |
+| LLM time to first token (Gemini 2.5 Flash on Vertex) | 0.313s |
+| TTS time to first byte (Cartesia) | 0.058s |
+| STT (Sarvam `saaras:v3`) | 0.483s |
+
+The agent can also send a payment link or re-authorise a dead mandate mid-call,
+as MCP tools it is allowed to call while talking. See [Known gaps](#known-gaps)
+for what is still rough — the honest list includes calls that end with no intent
+recorded, and a Razorpay account setting that currently breaks the mandate link.
 
 Webhook endpoint:
 `https://dunning-agent-862702522215.asia-south1.run.app/webhooks/razorpay`
@@ -178,7 +192,7 @@ resolve the subscription.
 uv run pytest
 ```
 
-163 tests. The signature, policy and conversation-graph tests are pure unit tests;
+597 tests. The signature, policy and conversation-graph tests are pure unit tests;
 the rest need the Postgres container and are skipped automatically if it is not
 reachable.
 
@@ -192,6 +206,55 @@ STOP being permanent, waiting cases writing no audit noise, a channel outage
 neither burning the customer's attempt budget nor aborting the rest of the
 batch, and the replay sweep leaving in-flight events alone while recovering
 stale ones.
+
+## Running more than one worker
+
+`FOR UPDATE SKIP LOCKED` is what lets the loop scale out, and the failure it
+prevents is not a slow batch — it is a customer whose payment failed being rung
+twice about the same debt by two machines a millisecond apart.
+
+That is checked rather than asserted. `tests/test_concurrency.py` runs real
+ticks concurrently against real Postgres, and reads the guarantee from both
+sides: what the workers think they did, and what the audit trail says happened.
+Comment out the `SKIP LOCKED` clause and three of those tests fail.
+
+To watch it instead of reading it:
+
+```bash
+uv run python -m scripts.scale_demo --cases 200 --workers 1   # baseline
+uv run python -m scripts.scale_demo --cases 600 --workers 6
+uv run python -m scripts.scale_demo --clear
+```
+
+Real `run_once`, real policy, real priority ordering. Only the telephony is
+faked, and every row it writes is stamped `source='seed'` — a column, not a
+naming convention — so simulated work can never be reported as recovered money.
+
+Measured on one laptop against local Postgres:
+
+| Cases | Workers | Wall time | Contacted twice |
+| ----- | ------- | --------- | --------------- |
+| 200   | 1       | 1.07s     | 0               |
+| 200   | 3       | 1.31s     | 0               |
+| 600   | 6       | 4.20s     | 0               |
+
+The even split is the interesting part, not the wall time: six workers took a
+hundred cases each without coordinating with one another, because the database
+did the coordinating.
+
+Two pieces make N workers safe rather than merely fast, and both are optional —
+everything degrades to the single-worker behaviour when they are absent:
+
+- **Redis** (`REDIS_URL`) holds the contact cooldown. A Postgres row lock
+  serialises one transaction, not a fleet, so without this two workers on two
+  machines can both read "not contacted recently" and both dial. `SET NX EX` is
+  atomic across all of them. It is a fast path and never the authority:
+  `customers.last_contacted_at` remains the rule, and a miss falls through to it.
+- **Pub/Sub** (`PUBSUB_TOPIC`) delivers webhook envelopes by push instead of
+  waiting for the next sweep. Worth knowing what it does *not* do: the handlers
+  it triggers only move case state, so pushing does not make a call happen
+  sooner. The five-minute floor on "failure → phone rings" is the scheduler's,
+  not the webhook path's.
 
 ## Deploy (GCP)
 
@@ -271,18 +334,42 @@ instance that cannot reach Cloud SQL.
   warning: the reconciler that would backfill from
   `GET /invoices?subscription_id=` is not built. The replay sweep does not cover
   this, because it only retries events we actually received.
-- **Background tasks, not a queue.** Webhook processing runs in-process via
-  FastAPI `BackgroundTasks`. The durable envelope plus the worker's replay sweep
-  means nothing is lost and stalled events are retried, but there is no backoff
-  or dead-letter queue — an event whose handler fails permanently is retried
-  every tick. Fine at hackathon volume; it would need a real queue in
-  production.
-- **No outbound telephony yet.** The conversation graph, intents and post-call
-  handling are built and tested, but nothing places a call. LiveKit Cloud alone
-  does not do PSTN — that needs a SIP trunk (Twilio/Plivo/Exotel) wired to
-  LiveKit SIP, and for Indian numbers, DLT registration. Until then the
-  orchestrator uses `LoggingChannel`, which records the intent to call and
-  explicitly does **not** pretend a call happened.
+- **Three paths reach the same webhook envelope, and one of them is
+  redundant.** Processing runs in-process via FastAPI `BackgroundTasks`
+  (~1s), announced on Pub/Sub for push delivery (~1s), and swept by the worker
+  for anything whose handler died. All three are safe because `process_event`
+  returns early once `processed_at` is set, and events that fail permanently are
+  dead-lettered rather than retried forever. But push and the background task do
+  the same job at the same speed: the only thing push adds is surviving the API
+  process being killed mid-handler, and even that is mostly covered because the
+  sweep runs before the orchestrator in the same tick. The genuine hole it
+  closes is about sixty seconds wide.
+- **Calls that end with no intent recorded.** The graph refuses any label that
+  is not a legal move from the current node, which is what stops a model
+  inventing an outcome for someone's money — but a conversation that ends
+  before reaching a terminal node records `unclear`, and the case simply stays
+  open. Two live calls stalled this way: at `explain` the model kept talking
+  instead of transitioning, and at `ask_intent` it sent the payment link, said
+  so, and treated that as having finished the step. Both are fixed by naming
+  the last step explicitly; neither is proven fixed across a run of calls.
+- **The mandate link lands on a dead page.** `send_mandate_link` creates the
+  subscription, fetches its `short_url` and texts it, and the SMS is delivered
+  — but Razorpay returns *"Hosted page is not available"* for it. Payment-link
+  pages render fine on the same key, so this is Subscriptions not being enabled
+  on the account rather than anything in the code. Account setting, not a fix.
+- **Two voice implementations.** `app/voice/agent.py` (LiveKit) predates
+  `app/voice/pipecat_agent.py` (Twilio) and is not what production runs. It is
+  kept for the browser-demo path but has not tracked recent fixes; read the
+  Pipecat one.
+- **A self-hosted model path exists and is unproven on a call.**
+  `scripts/modal_llm.py` and `scripts/modal_speech.py` serve Gemma 4 12B,
+  SraVaani-1.0 and VoxCPM2 on a rented GPU, behind `LOCAL_SPEECH_URL` and
+  `llm_provider=local`. Each model works in isolation — Devanagari out,
+  tool calls parsed, a full text→speech→text round trip — but no phone call has
+  completed on that path. Warm, it measured TTS first byte 0.86s and STT 4.1s
+  on a ten-second clip against the cloud path's 0.512s per turn. The honest
+  summary is that it is a data-residency option with a real latency cost, not a
+  faster alternative.
 - **The app connects to Cloud SQL as the `postgres` superuser.** A dedicated
   least-privilege role is the right answer; it was skipped because setting up
   grants needs a `psql` session the deploy box did not have. The credential
