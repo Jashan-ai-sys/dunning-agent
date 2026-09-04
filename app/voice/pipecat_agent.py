@@ -21,6 +21,7 @@ against the current API where they earn their place.
 import asyncio
 import logging
 import os
+import re
 import sys
 
 from dotenv import load_dotenv
@@ -132,12 +133,55 @@ def normalize_for_speech(text: str, language: str = "hi") -> str:
 #: the model resolves it by greeting -- which it did, on a live call. The
 #: node's edges are untouched, so identity confirmation and the
 #: wrong-number path work exactly as before.
+#: "React to what they say" was the whole of the old instruction here, and it
+#: is what produced the second parroting bug on a live call. Read it with the
+#: rest of the stage in front of you: do not greet, do not introduce yourself,
+#: do not name the company, do not mention the payment -- and then, from
+#: `stage_instructions`, say something in the same response as the tool call.
+#: To a bare "हाँ जी।" there is no permitted content left, and the only move
+#: the model has is to hand the words back. It did, three times out of three,
+#: and each echo entered the context as an assistant turn and taught it the
+#: pattern for the next one.
+#:
+#: The fix is to name the permitted move rather than forbid every other one. A
+#: three-word acknowledgement is something to say, and telling the model the
+#: next stage carries the content removes the pressure to fill this turn.
+#: Punctuation and spacing only -- the two Devanagari danda forms and the ASCII
+#: equivalents Sarvam sometimes returns. Comparing without them means "हाँ जी।"
+#: and "हाँ जी" are recognised as the same words, which is the whole point.
+_ECHO_STRIP = re.compile(r"[।॥.,!?\s]+")
+
+
+def _is_echo(spoken: str, heard: str) -> bool:
+    """Is the model's line just the customer's words handed back?
+
+    Substring rather than equality, in both directions. The observed failure
+    was not always verbatim: the model returned the previous utterance joined
+    to the current one ("या। सर पेमेंट में..."), so an exact match would have
+    missed the case that actually happened on the call.
+
+    Very short lines are exempt. "जी।" is a legitimate acknowledgement and is
+    also something the customer says; refusing it would suppress the one reply
+    the greet stage is now explicitly asked to give.
+    """
+    a = _ECHO_STRIP.sub("", spoken)
+    b = _ECHO_STRIP.sub("", heard)
+    if not a or not b or len(b) < 4:
+        return False
+    return a in b or b in a
+
+
 ALREADY_GREETED = (
     "You have already introduced yourself and asked whether you are "
     "speaking to the customer. They are answering that question now. Do "
-    "NOT greet, introduce yourself, or say the company name again. React "
-    "to what they say. Do not mention the failed payment until identity "
-    "is confirmed -- this is someone's billing information."
+    "NOT greet, introduce yourself, or say the company name again, and "
+    "never repeat the customer's own words back to them. If they confirm "
+    "it is them, say a short acknowledgement of at most three words -- "
+    "जी शुक्रिया। -- and call the transition tool in the same "
+    "response. The next stage carries what to say about the payment, so "
+    "there is nothing else you need to fill this turn with. Do not mention "
+    "the failed payment until identity is confirmed -- this is someone's "
+    "billing information."
 )
 
 
@@ -840,22 +884,47 @@ class DunningSession:
         latest message carries the tool call; if it also carries non-empty
         text, the customer is already being spoken to and running the LLM
         again would only add a second sentence they did not need.
+
+        An echo does not count. This asked only whether the text was non-empty,
+        and on a live call the model answered "हाँ जी।" to a customer who had
+        just said "हाँ जी।" -- which passed, suppressed the follow-up run, and
+        left the echo as the whole turn. The real answer then arrived one turn
+        late, every time, for the rest of the call.
+
+        Treating an echo as silence is the conservative direction: the cost of
+        being wrong is one extra Vertex round trip, and the cost of the old
+        behaviour was a customer hearing themselves instead of an answer.
         """
+        spoken = self._assistant_text_this_turn()
+        if not spoken:
+            return False
+
+        heard = self._last_user_said()
+        if heard and _is_echo(spoken, heard):
+            logger.warning(
+                "model echoed the customer (%r); treating the turn as silent "
+                "so the follow-up run produces a real reply",
+                spoken[:80],
+            )
+            return False
+        return True
+
+    def _assistant_text_this_turn(self) -> str:
+        """The text on the assistant's latest message, across content shapes."""
         for message in reversed(self.llm_context.get_messages()):
             if message.get("role") != "assistant":
                 continue
             content = message.get("content")
             if isinstance(content, str):
-                return bool(content.strip())
+                return content.strip()
             if isinstance(content, list):
-                return any(
-                    isinstance(part, dict)
-                    and part.get("type") == "text"
-                    and str(part.get("text", "")).strip()
+                return " ".join(
+                    str(part.get("text", "")).strip()
                     for part in content
-                )
-            return False
-        return False
+                    if isinstance(part, dict) and part.get("type") == "text"
+                ).strip()
+            return ""
+        return ""
 
     def _stage_message(self) -> dict:
         """The opening stage, as the first turn of the conversation.
