@@ -65,7 +65,9 @@ def test_greet_stage_names_a_permitted_reply():
     speech, which is what left echoing as the only available move. Whatever
     this text becomes, it has to tell the model something it MAY say."""
     assert "never repeat the customer's own words" in ALREADY_GREETED
-    assert "short acknowledgement" in ALREADY_GREETED
+    assert "short acknowledgement in your own words" in ALREADY_GREETED
+    # No literal phrase dictated -- the words are the model's to choose.
+    assert "जी शुक्रिया" not in ALREADY_GREETED
     # And it must still hold the compliance line it was written for.
     assert "until identity is confirmed" in ALREADY_GREETED
 

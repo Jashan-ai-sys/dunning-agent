@@ -184,12 +184,12 @@ ALREADY_GREETED = (
     "speaking to the customer. They are answering that question now. Do "
     "NOT greet, introduce yourself, or say the company name again, and "
     "never repeat the customer's own words back to them. If they confirm "
-    "it is them, say a short acknowledgement of at most three words -- "
-    "जी शुक्रिया। -- and call the transition tool in the same "
-    "response. The next stage carries what to say about the payment, so "
-    "there is nothing else you need to fill this turn with. Do not mention "
-    "the failed payment until identity is confirmed -- this is someone's "
-    "billing information."
+    "it is them, give a short acknowledgement in your own words -- at most "
+    "three words, whatever a polite person would actually say here -- and "
+    "call the transition tool in the same response. The next stage carries "
+    "what to say about the payment, so there is nothing else you need to "
+    "fill this turn with. Do not mention the failed payment until identity "
+    "is confirmed -- this is someone's billing information."
 )
 
 
