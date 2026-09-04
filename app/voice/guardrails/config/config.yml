@@ -1,0 +1,22 @@
+# NeMo Guardrails: output rails only.
+#
+# `dialog: false` is the load-bearing line. Colang flows are a state machine,
+# and this agent already has one -- `ConversationGraph` in `flow.py`, walked by
+# `GraphWalker`, which is where a turn is decided and where an illegal move is
+# refused. Two state machines disagreeing about what turn it is would be worse
+# than neither, so NeMo is given no say over dialogue and one job instead:
+# inspect the sentence about to be spoken.
+#
+# There is no `models:` entry because none of these rails call a model. Every
+# check is a registered Python action -- see `actions.py`. That is deliberate:
+# `self_check_output` costs an LLM round trip per turn, and this pipeline
+# answers in 0.512s p50 with 0.313s of that already spent on time to first
+# token. A second round trip would roughly double the number the whole product
+# is measured on.
+
+instructions: []
+
+rails:
+  output:
+    flows:
+      - dunning output check

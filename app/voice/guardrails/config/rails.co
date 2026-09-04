@@ -1,0 +1,15 @@
+# The one output rail. Everything it decides comes from `check_dunning_output`,
+# a plain Python action -- no model is consulted, so the rail costs microseconds
+# rather than a round trip.
+#
+# `stop` is what makes this a rail rather than a log line: it halts the turn, so
+# the offending sentence never reaches TTS and the customer never hears it.
+
+define subflow dunning output check
+  $violation = execute check_dunning_output(text=$bot_message)
+  if $violation
+    bot say withheld
+    stop
+
+define bot say withheld
+  "क्षमा कीजिए, मैं इस पर आपकी मदद नहीं कर सकता। मेरा एक सहयोगी आपसे संपर्क करेगा।"

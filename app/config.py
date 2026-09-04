@@ -234,6 +234,15 @@ class Settings(BaseSettings):
     local_llm_model: str = "LiquidAI/LFM2.5-8B-A1B"
     local_llm_api_key: str = "not-needed"
 
+    # NeMo Guardrails output rails: "off" | "audit" | "block".
+    #
+    # Defaults to off so installing the dependency changes nothing about a live
+    # call until somebody decides it should. "audit" streams normally and logs
+    # what it would have stopped, costing no latency; "block" holds each turn
+    # until the rail clears it, which forfeits progressive TTS and with it the
+    # 0.058s time to first byte. See `app/voice/guardrails/processor.py`.
+    guardrails_mode: str = "off"
+
     # Blostem's production debt-recovery template runs 0.2 / 120. A dunning
     # call wants consistency over flair, and a cap keeps turns to the one or
     # two sentences a phone call can carry.

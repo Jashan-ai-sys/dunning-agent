@@ -33,6 +33,7 @@ pipecat = [
     "python-dotenv",
     "pipecat-ai-prebuilt>=1.0.5",
     "pipecat-backchannel>=0.3.3",
+    "nemoguardrails>=0.24",
 ]
 
 # Not installed by default: the webhook service's container has no need for

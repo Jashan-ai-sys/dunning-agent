@@ -65,6 +65,7 @@ from app.store import utcnow
 from app.voice.call_body import load_call_body
 from app.voice.flow import DUNNING_FLOW, greeting_for, halt_note, language_hint
 from app.voice.graph import NodeKind
+from app.voice.guardrails import build_guardrail
 from app.voice.instrumentation import TimedSileroVAD, TimedSmartTurnAnalyzer
 from app.voice.intents import CallIntent
 from app.voice.local_services import LocalSTTService, LocalTTSService
@@ -603,6 +604,7 @@ class DunningSession:
         self.llm_context.set_messages(opening)
         self.finished = asyncio.Event()
         self.recovery_case_id: int | None = context.get("_recovery_case_id")
+        self.amount_paise: int | None = context.get("_amount_paise")
         self.voice_call_id: int | None = None
         self.started_at = utcnow()
         self._finalised = False
@@ -976,6 +978,10 @@ def call_context(*, customer_name: str, amount_paise: int, failure_reason: str,
         "suggested_route": route,
     }
     context["_language"] = language
+    # The digits, kept alongside the spoken form. `amount_spoken` is words and
+    # is what the agent says; the guardrail compares figures, and needs the
+    # number the words were rendered from rather than the words.
+    context["_amount_paise"] = amount_paise
     return context
 
 
@@ -1149,6 +1155,19 @@ async def _run_pipeline(session, transport, stt, llm, tts, aggregators) -> Dunni
         transport.output(),
         aggregators.assistant(),
     ]
+
+    # Between the model and the voice: the last point at which a sentence is
+    # still text. `build_guardrail` returns None when the mode is "off", which
+    # is the default, so this is a no-op unless someone turned it on.
+    guardrail = build_guardrail(
+        get_settings().guardrails_mode,
+        expected_amount_rupees=(
+            f"{session.amount_paise / 100:.2f}" if session.amount_paise else None
+        ),
+    )
+    if guardrail is not None:
+        processors.insert(processors.index(tts), guardrail)
+        logger.info("guardrails active in %s mode", get_settings().guardrails_mode)
 
     # Backchannel wraps the list and inserts its own processors -- it is not a
     # service we place ourselves. Keep the returned list; the gate has to be
