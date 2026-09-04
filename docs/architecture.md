@@ -52,6 +52,22 @@ Nothing is interpreted in the request. The envelope is durable, and
               returns early once processed_at is set
 ```
 
+**The push endpoint authenticates with OIDC, not a shared secret.** Pub/Sub push
+cannot send custom headers, so the alternatives were a token in the URL — which
+lands in every access log — or verifying the signed token Google attaches. This
+endpoint dispatches handlers that create payment links and place phone calls, so
+it gets the real one (`app/webhooks/pubsub_router.py`):
+
+- the bearer token is verified with `id_token.verify_oauth2_token` against the
+  subscription's configured audience;
+- the claims must carry the expected service-account `email` *and*
+  `email_verified`, or the request is 403'd;
+- if `PUBSUB_PUSH_SERVICE_ACCOUNT` is unset the endpoint answers **503 rather
+  than running unauthenticated** — a push endpoint that dispatches handlers is
+  not something to leave open because a setting was forgotten;
+- anything that must not be redelivered gets a 204, including an unparseable
+  message, because Pub/Sub retries until acknowledged.
+
 All three are safe because `process_event` is idempotent. Push and the
 background task do the same job at the same speed; the genuine hole push closes
 is about sixty seconds wide — the window where the API process is killed

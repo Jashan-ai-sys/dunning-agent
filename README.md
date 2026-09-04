@@ -93,6 +93,28 @@ before any handler runs, so a crash mid-processing cannot lose an event —
 `webhook_events.processed_at IS NULL` is the replay queue, and Razorpay's own
 at-least-once redelivery is a backstop rather than the only safety net.
 
+Three paths reach that envelope, and all three are safe because `process_event`
+returns early once `processed_at` is set: the in-process background task, a
+Pub/Sub push, and the cron sweep. The sweep alone was always correct — push is
+an accelerator on a mechanism that already worked, and everything on that path
+is written so that losing push costs latency and nothing else.
+
+**The push endpoint authenticates with OIDC, not a shared secret.** Pub/Sub
+push cannot send custom headers, so the only alternatives were a token in the
+URL — which lands in every access log — or verifying the signed token Google
+attaches. This endpoint dispatches handlers that create payment links and place
+phone calls, so it gets the real one: the token is verified against the
+subscription's audience, and the request is refused unless the claims carry the
+expected service-account `email` *and* `email_verified`.
+
+It also refuses to run **unauthenticated by omission**. If
+`PUBSUB_PUSH_SERVICE_ACCOUNT` is unset the endpoint answers 503 rather than
+accepting the request — a push endpoint that dispatches handlers is not
+something to leave open because a setting was forgotten. And it answers 204 to
+anything that must not be redelivered, including a message it cannot parse,
+because Pub/Sub retries until acknowledged and a permanently malformed message
+would otherwise come back forever.
+
 A separate worker loop drives recovery forward:
 
 ```
