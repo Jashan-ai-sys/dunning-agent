@@ -51,6 +51,37 @@ Webhook endpoint:
 
 ---
 
+## Where to look
+
+If you have five minutes, read [The event model](#the-event-model-read-this-first)
+and [The recovery policy](#the-recovery-policy). Those two sections contain the
+decisions; everything else is how they are wired up.
+
+| I want to know… | Go to | Code |
+|---|---|---|
+| Why a failed subscription charge is three webhooks, not one | [The event model](#the-event-model-read-this-first) | [`webhooks/handlers.py`](app/webhooks/handlers.py) |
+| How an event becomes a case without being lost | [Architecture](#architecture) | [`webhooks/processor.py`](app/webhooks/processor.py) |
+| When we call, when we wait, and when we stop | [The recovery policy](#the-recovery-policy) | [`policy.py`](app/policy.py) |
+| Why the model cannot invent an outcome | [The conversation is a graph](docs/architecture.md#the-conversation-is-a-graph-not-a-prompt) | [`voice/walker.py`](app/voice/walker.py) |
+| Why the agent cannot name a case | [MCP tools](docs/architecture.md#mcp--what-the-agent-may-do) | [`mcp_server.py`](app/mcp_server.py) |
+| Whether it survives more than one worker | [Running more than one worker](#running-more-than-one-worker) | [`orchestrator.py`](app/orchestrator.py) |
+| What runs where, and the VAD/STT settings | [Architecture doc](docs/architecture.md) | — |
+| What does **not** work yet | [Known gaps](#known-gaps) | — |
+
+Four properties hold everywhere, and each is enforced in code rather than by
+convention:
+
+1. **The model cannot invent an outcome.** It picks an edge *label*, validated
+   against the current node; an illegal one is refused, not followed.
+2. **The agent cannot name a case.** The MCP tools take no arguments — the case
+   is injected out of the model's reach.
+3. **Simulated work can never be reported as recovered money.** `source` is a
+   column, not a naming convention.
+4. **Nobody is rung twice about the same debt.** `FOR UPDATE SKIP LOCKED`, with
+   a concurrency test that reads the guarantee from both sides.
+
+---
+
 ## The event model (read this first)
 
 There is **no `subscription.charged.failed` webhook**. That event does not exist
@@ -132,37 +163,80 @@ worker tick (every 5 min in prod, 60s locally)
 
 ## The recovery policy
 
-Every case leaves the policy as exactly one of **CALL**, **WAIT** or **STOP**,
-and STOP is permanent. That is what makes the workflow bounded. The rules, in
-evaluation order — all STOP conditions are checked before any WAIT condition, so
-a dead case gets closed out rather than parked forever outside the calling
-window:
+`decide(case, customer, now, settings)` is a **pure function** — no database, no
+clock, no network. `now` and `settings` are arguments, which is what makes every
+rule below a plain unit test.
 
-| # | Rule | Outcome |
+It returns exactly one decision, and the ladder is ordered: every **STOP** is
+checked before any **WAIT**, so a dead case gets closed rather than parked
+forever outside the calling window. First match wins.
+
+| # | Condition | Outcome |
 |---|---|---|
 | 1 | Case already recovered / declined / stopped | **STOP** `already_closed` |
-| 2 | `attempt_count >= max_attempts` (default 3) | **STOP** `max_attempts_reached` |
-| 3 | Amount below `MIN_RECOVERABLE_AMOUNT_PAISE` (default ₹50) | **STOP** `below_min_amount` |
-| 4 | No phone number on file | **STOP** `no_contact_number` |
-| 5 | Last attempt within `RETRY_BACKOFF_HOURS` (default 24h) | **WAIT** `within_backoff` |
-| 6 | Outside 09:00–21:00 in `CONTACT_TIMEZONE` | **WAIT** `outside_contact_window` |
-| — | Otherwise | **CALL** |
+| 2 | Customer flagged `do_not_contact` | **STOP** `do_not_contact` |
+| 3 | `attempt_count >= max_attempts` | **STOP** `max_attempts_reached` |
+| 4 | `max_delivery_failures` consecutive send failures | **STOP** `undeliverable` |
+| 5 | Below `MIN_RECOVERABLE_AMOUNT_PAISE` (₹50) | **STOP** `below_min_amount` |
+| 6 | Root cause is `configuration` — our bug, not theirs | **STOP** `needs_human` |
+| 7 | No usable contact details | **STOP** `no_contact_details` |
+| 8 | Last attempt within `RETRY_BACKOFF_HOURS` (24h) | **WAIT** `within_backoff` |
+| 9 | Razorpay still retrying, inside `BANK_RETRY_GRACE_HOURS` (72h) | **WAIT** `awaiting_bank_retry` |
+| 10 | This *person* contacted within `CUSTOMER_CONTACT_COOLDOWN_HOURS` (24h) | **WAIT** `customer_recently_contacted` |
+| 11 | Outside 09:00–21:00 in `CONTACT_TIMEZONE` | **WAIT** `outside_contact_window` |
+| — | Otherwise | **act** — see below |
 
-Rule 6 is the compliance rule: TRAI restricts commercial calls to 09:00–21:00,
-and the window is evaluated in the customer's local time rather than UTC —
-getting that wrong means calling people at 3am. Rule 5 is what stops a
-once-a-minute tick from becoming a once-a-minute call.
+Three rules are worth singling out:
 
-[`app/policy.py`](app/policy.py) is pure — no database, no clock, no network.
-`now` and `settings` are arguments, so every rule above is covered by a plain
-unit test.
+- **Rule 11 is the compliance rule.** TRAI restricts commercial calls to
+  09:00–21:00, and the window is evaluated in the customer's local time rather
+  than UTC. Getting that wrong means calling people at 3am.
+- **Rule 2 lives on the customer, not the case.** The obligation follows the
+  person: a second failed charge opens a second case, and a case-scoped
+  suppression would happily dial a wrong number all over again.
+- **Rules 8 and 10 are different on purpose.** Rule 8 bounds one *case*; rule 10
+  bounds one *person*. A customer with three failed charges should hear from us
+  once, not three times — one subscription produced four cases in two hours
+  during testing.
 
-Cases Razorpay has itself given up on (`halted_at` set, from
-`subscription.halted`) are worked first. Contact is made through the
-`ContactChannel` protocol, so Phase 3 swaps in LiveKit without touching the
-policy or the loop; until then `LoggingChannel` records the intent and is named
-`logging` in the audit trail so a run can never be mistaken for evidence that a
-customer was actually called.
+### What "act" means — priority decides order, not channel
+
+A common misreading of the tier table below is that tier 2 gets phoned second.
+It does not. Three decisions are separate:
+
+| Decision | Made by | Answers |
+|---|---|---|
+| **Order** | `priority_tier` + `score()` | Who is worked first in this batch |
+| **Channel** | `_intervention_for()` → root cause | Link, call, or mandate re-charge |
+| **Timing** | the WAIT gates above | Whether *now* is allowed at all |
+
+Only `CUSTOMER_INSTRUMENT` — a dead or expired card, a revoked mandate — is in
+`NEEDS_A_CONVERSATION`, so **only a dead instrument earns a phone call on the
+first attempt.** A link cannot fix an expired card: it would recover today's
+money and leave the subscription to break again next cycle, so somebody has to
+talk to them about the instrument.
+
+Everything else opens with a **payment link**, which is cheap and interrupts
+nobody, and reaches the phone only on a second attempt — which cannot happen
+inside `RETRY_BACKOFF_HOURS`. So a customer who was about to retry the payment
+themselves is never rung mid-attempt.
+
+| Tier | Name | First action | Why |
+|---|---|---|---|
+| 1 | `MANDATE_BROKEN` | **Call** | The only tier where *every future charge* fails too |
+| 2 | `PAYMENT_ATTEMPTED` | Link | They were trying to pay. Warm intent, but they may retry themselves |
+| 3 | `CHECKOUT_ABANDONED` | Link | *Reserved* — Razorpay sends no webhook for an abandoned checkout |
+| 4 | `BACKGROUND` | Link | Bank-side, transient, or undiagnosed |
+
+`score()` weighs the tier against the size of the debt and whether Razorpay has
+stopped retrying, with age breaking ties so nothing starves. A large enough debt
+can outrank a higher tier; a marginal one cannot.
+
+Contact goes through the `ContactChannel` protocol, so the transport is a
+deployment choice rather than a rewrite. Production runs `TwilioChannel`. If no
+telephony is configured the loop degrades to `LoggingChannel`, which is named
+`logging` in the audit trail precisely so a run of it can never be mistaken for
+evidence that a customer was actually called.
 
 ### Tables
 
@@ -237,7 +311,7 @@ resolve the subscription.
 uv run pytest
 ```
 
-597 tests. The signature, policy and conversation-graph tests are pure unit tests;
+636 tests. The signature, policy and conversation-graph tests are pure unit tests;
 the rest need the Postgres container and are skipped automatically if it is not
 reachable.
 
