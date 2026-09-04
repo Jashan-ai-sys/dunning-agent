@@ -328,6 +328,25 @@ instance that cannot reach Cloud SQL.
 
 ## Known gaps
 
+- **A customer who was mid-payment gets no grace period.** An abandoned
+  checkout waits `checkout_grace_minutes` (30) before we chase it, on the
+  reasoning that someone who retries with another card two minutes later has
+  not abandoned anything. A *subscription* charge that failed while the
+  customer was in the flow — an OTP screen, a bank redirect, `error_step` of
+  `payment_authentication` or `payment_authorization` — has no equivalent wait,
+  so it is picked up on the next five-minute tick. The blast radius is small
+  because the first intervention for those causes is a payment link rather than
+  a call, and a link is cheap and interrupts nobody. But it is inconsistent: a
+  customer who is *still on the OTP screen* may well complete the payment in the
+  next two minutes, and an SMS landing mid-attempt is noise at best and
+  confusing at worst.
+
+  The fix is a `payment_attempted_grace_minutes` gate alongside the checkout
+  one. It has to key on the priority tier and not on `error_step`: an expired
+  card also fails at `payment_authorization`, and that case is tier 1 and
+  deliberately calls immediately — deferring it would be a regression, not a
+  refinement.
+
 - **`subscription.pending` with no open case — still open.** If Razorpay's
   `payment.failed` never reaches us (endpoint down past its retry window), the
   subscription goes pending with nothing to attach to. Still only logged as a
