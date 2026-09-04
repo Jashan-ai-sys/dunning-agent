@@ -756,6 +756,19 @@ class DunningSession:
         # hears. When it does not comply, the follow-up is the only thing
         # standing between the customer and silence, so this checks rather than
         # assumes: batching is an optimisation, not a promise the model keeps.
+        # The follow-up now always runs, and the optimisation above is kept only
+        # as a measurement. Two live calls settled the argument: whatever the
+        # model batches is written against the stage it is LEAVING, so it cannot
+        # contain the line the new stage exists to deliver. Suppressing the
+        # follow-up therefore does not save a redundant sentence -- it drops the
+        # only sentence that mattered, and the stage sits undelivered until the
+        # customer speaks again. Measured at 5.7s of dead air after an
+        # acknowledgement, and 3030ms of logged silence at the next transition,
+        # with the customer saying "हेलो" to check the line was still open.
+        #
+        # The cost is one Vertex round trip, ~0.5s against a 0.512s p50 turn.
+        # That is the right trade: a round trip is cheaper than a silence the
+        # customer has to break.
         spoke = self._model_spoke_this_turn()
         await params.result_callback(
             {
@@ -763,11 +776,14 @@ class DunningSession:
                 "now_at_stage": self.walker.node.id,
                 "do_this_now": self.walker.stage_instructions(),
             },
-            properties=FunctionCallResultProperties(run_llm=not spoke),
+            properties=FunctionCallResultProperties(run_llm=True),
         )
         logger.info(
-            "transition batched=%s (model %s alongside the tool call)",
-            spoke, "spoke" if spoke else "stayed silent",
+            "transition -> %s; model %s alongside the tool call (%r), "
+            "follow-up run regardless",
+            self.walker.node.id,
+            "spoke" if spoke else "stayed silent",
+            self._assistant_text_this_turn()[:60],
         )
 
         if self.walker.finished:
