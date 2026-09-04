@@ -18,12 +18,28 @@ special-cased for a live call.
 
 Measured on production calls, not a laptop:
 
-| | p50 |
-| ------------------------------- | ------ |
-| Customer stops speaking → agent replies | 0.512s |
-| LLM time to first token (Gemini 2.5 Flash on Vertex) | 0.313s |
-| TTS time to first byte (Cartesia) | 0.058s |
-| STT (Sarvam `saaras:v3`) | 0.483s |
+| | p50 | n |
+| ------------------------------- | ------ | --- |
+| STT time to first byte (Sarvam `saaras:v3`) | 0.396s | 6 |
+| Turn detection (SmartTurn v3, ONNX, on CPU) | 0.173s | 7 |
+| LLM time to first token (Gemini 2.5 Flash on Vertex) | 0.553s | 11 |
+| TTS time to first byte (Cartesia) | 0.068s | 10 |
+| TTS time to first audio | 0.209s | 10 |
+| **Customer stops speaking → agent replies** | **~1.13s** | |
+
+Measured on a single production call on 2026-09-04, from the Cloud Run logs.
+An earlier run of this table reported 0.313s for the LLM; that figure predates
+a change that runs a second inference after every graph transition, so the
+model is now asked twice on those turns. It buys the turn that used to be
+dropped — before it, the stage the agent had just moved to went undelivered
+until the customer spoke again, measured at 5.7s of dead air. One extra round
+trip is the cheaper of the two.
+
+One turn in that sample returned in **0.045s**, an order of magnitude under the
+median: Gemini's implicit cache hitting the stable prefix. That prefix is
+deliberate — see `SYSTEM_STYLE` and the transition handler, which appends the
+stage handoff as a tool result rather than rewriting the system message,
+precisely so the prefix never shifts.
 
 The agent can also send a payment link or re-authorise a dead mandate mid-call,
 as MCP tools it is allowed to call while talking. See [Known gaps](#known-gaps)
@@ -141,11 +157,18 @@ customer was actually called.
 Requires Python 3.11+, [uv](https://docs.astral.sh/uv/), and Docker.
 
 ```bash
-uv sync
+uv sync --group pipecat --group voice
 cp .env.example .env          # then fill in your Razorpay test keys
 docker compose up -d db       # Postgres on localhost:5433
 uv run alembic upgrade head
 ```
+
+> The two groups are not optional for a full checkout. A bare `uv sync`
+> installs the main dependencies and `dev` only, and the test suite imports
+> `pipecat` and `mcp` (voice-agent tests) and `livekit` (the older dispatch
+> path). Miss either and pytest aborts during collection, which reads as
+> "everything is broken" rather than "two groups are missing". The deployed
+> webhook image still installs neither — it has no use for a voice stack.
 
 > Port 5433, not 5432 — this machine already had a Postgres on 5432 and
 > `localhost:5432` silently resolved to it instead of the container.
@@ -256,6 +279,44 @@ everything degrades to the single-worker behaviour when they are absent:
   sooner. The five-minute floor on "failure → phone rings" is the scheduler's,
   not the webhook path's.
 
+## Running the whole voice stack on our own GPU
+
+On a payments call the audio *is* customer data. "The recording never leaves
+your infrastructure" is a procurement answer before it is an engineering one,
+and RBI data-localisation rules make it a requirement rather than a talking
+point. It is also insurance: a vendor quota ran out mid-call once already, and
+the agent talked to nobody for two minutes while every log said the call was
+fine.
+
+So the same conversation runs on three self-hosted models, behind
+`LLM_PROVIDER=local` and `LOCAL_SPEECH_URL`. Everything above them — the graph,
+the walker, the policy, the outcome — is unchanged and does not know which pair
+is running. Deployed with `modal deploy scripts/modal_llm.py` and
+`scripts/modal_speech.py`; vLLM and the weights live in the Modal image, never
+on a developer machine.
+
+**The models were chosen against hard requirements, not benchmarks.**
+
+| Role | Model | Why this one |
+| ---- | ----- | ------------ |
+| LLM | Gemma 4 12B (vLLM) | **Tool calling** is not negotiable — the whole state machine rides on the model calling `transition(label)`, and Gemma 4 is the first Gemma with tool calling in its own chat template with a matching vLLM parser. **Devanagari at 1.39 tokens per word**, the best of eleven tokenizers measured, and roughly a third of what Qwen spends on the same Hindi. |
+| STT | SraVaani-1.0 (ARTPARK/IISc, MIT) | 430M parameters, 65 Indian languages, and — the reason it is here rather than Whisper — trained with **code-switching tagging**. Real customers on an Indian line speak Hindi and English in the same sentence, and our own transcripts are full of it. |
+| TTS | VoxCPM2 | Generates **progressively**, so the customer waits for the first chunk rather than the last one. Native 48 kHz, resampled into the 8 kHz phone leg. |
+
+**What was tested, and what was not.** Each model works in isolation: Devanagari
+out of the LLM, tool calls parsed, and a full text→speech→text round trip
+through the pair. Warm, it measured **TTS first byte 0.86s and STT 4.1s** on a
+ten-second clip, against the cloud path's 0.512s per complete turn. **No phone
+call has run end to end on it.**
+
+The honest summary is that this is a *data-residency option with a real latency
+cost*, not a faster alternative. STT is the floor: SraVaani transcribes a
+complete utterance, so unlike the TTS side it cannot stream its way out of the
+problem, and closing that gap means a different model or a faster serving stack
+rather than tuning. A cold GPU container also takes about 264 seconds to start
+— the client timeout was raised to 300s after 120s left the agent silent on a
+live call.
+
 ## Deploy (GCP)
 
 Three pieces: a Cloud Run **service** for the webhook, a Cloud Run **job** for
@@ -321,6 +382,10 @@ instance that cannot reach Cloud SQL.
 - [The live pipeline, end to end](docs/pipeline.md) — what actually runs, in
   order, with real component names and configured values. Anything unbuilt is
   marked as such rather than drawn as if it worked.
+
+- [Architecture](docs/architecture.md) — the two planes in full: webhook
+  intake and recovery on one side, the voice pipeline on the other, the two
+  seams between them, and the VAD/STT settings with the reasoning behind each.
 
 - [Fully local voice stack](docs/local-voice-architecture.md) — the proposed
   self-hosted STT/LLM/TTS design, why the entity-dense ASR gap matters more
