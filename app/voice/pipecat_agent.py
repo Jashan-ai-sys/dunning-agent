@@ -151,6 +151,14 @@ def normalize_for_speech(text: str, language: str = "hi") -> str:
 #: and "हाँ जी" are recognised as the same words, which is the whole point.
 _ECHO_STRIP = re.compile(r"[।॥.,!?\s]+")
 
+#: Stripped length below which a model turn is an acknowledgement rather than
+#: the stage's content. "जी शुक्रिया।" is 10 characters once punctuation goes;
+#: the shortest real stage line measured on a call -- "क्या आपको पता है कि
+#: पेमेंट क्यों नहीं हो पाया?" -- is 38. The gap is wide enough that the exact
+#: threshold does not matter much, which is the property you want in a
+#: heuristic that decides whether to spend a round trip.
+ACK_MAX_CHARS = 24
+
 
 def _is_echo(spoken: str, heard: str) -> bool:
     """Is the model's line just the customer's words handed back?
@@ -905,6 +913,24 @@ class DunningSession:
                 "model echoed the customer (%r); treating the turn as silent "
                 "so the follow-up run produces a real reply",
                 spoken[:80],
+            )
+            return False
+
+        # An acknowledgement is not the turn's content. The greet stage asks
+        # for exactly one -- "जी शुक्रिया।" -- and counting it as speech
+        # suppressed the follow-up run, so the stage we had just moved to was
+        # never delivered. Measured on a live call: 5.7s of dead air after the
+        # ack, ending only because the customer said "हेलो" to check we were
+        # still there, and 3030ms of silence at the next transition.
+        #
+        # Letting the follow-up run costs one Vertex round trip (~0.5s) and
+        # produces what a person would actually say: the acknowledgement and
+        # then the reason for the call, in one breath.
+        if len(_ECHO_STRIP.sub("", spoken)) <= ACK_MAX_CHARS:
+            logger.info(
+                "model said only an acknowledgement (%r); running the follow-up "
+                "so the new stage is delivered without waiting for the customer",
+                spoken[:40],
             )
             return False
         return True

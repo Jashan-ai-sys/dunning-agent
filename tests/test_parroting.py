@@ -68,3 +68,29 @@ def test_greet_stage_names_a_permitted_reply():
     assert "short acknowledgement" in ALREADY_GREETED
     # And it must still hold the compliance line it was written for.
     assert "until identity is confirmed" in ALREADY_GREETED
+
+
+# -- the stall the parroting fix exposed -------------------------------------
+
+def test_an_acknowledgement_is_shorter_than_any_real_stage_line():
+    """`_model_spoke_this_turn` suppresses the follow-up run when the model has
+    already spoken. A 3-word ack is not the stage's content, and counting it as
+    speech cost 5.7s of dead air on a live call -- the customer said "हेलो" to
+    check the line was still open.
+
+    This pins the gap the threshold sits in: acknowledgements below it, real
+    stage lines above it.
+    """
+    from app.voice.pipecat_agent import _ECHO_STRIP, ACK_MAX_CHARS
+
+    acks = ["जी शुक्रिया।", "जी।", "बिल्कुल।", "समझा।"]
+    stage_lines = [
+        "क्या आपको पता है कि पेमेंट क्यों नहीं हो पाया?",
+        "आपके सब्सक्रिप्शन का ४९९ रुपये का पेमेंट नहीं हो पाया है क्योंकि आपका कार्ड एक्सपायर हो गया है।",
+        "मैं आपको पेमेंट लिंक एसएमएस पर भेज देता हूँ।",
+    ]
+
+    for ack in acks:
+        assert len(_ECHO_STRIP.sub("", ack)) <= ACK_MAX_CHARS, ack
+    for line in stage_lines:
+        assert len(_ECHO_STRIP.sub("", line)) > ACK_MAX_CHARS, line
