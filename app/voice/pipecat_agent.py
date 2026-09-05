@@ -37,7 +37,9 @@ from pipecat.frames.frames import (
     EndFrame,
     Frame,
     FunctionCallResultProperties,
+    InterimTranscriptionFrame,
     LLMRunFrame,
+    TranscriptionFrame,
     TTSSpeakFrame,
 )
 from pipecat.pipeline.pipeline import Pipeline
@@ -67,6 +69,7 @@ from pipecat_backchannel.processor import BackchannelProcessor
 from app.config import get_settings
 from app.constants import CallStatus
 from app.store import utcnow
+from app.voice.announcements import is_carrier_announcement
 from app.voice.call_body import load_call_body
 from app.voice.flow import DUNNING_FLOW, greeting_for, halt_note, language_hint
 from app.voice.graph import NodeKind
@@ -664,9 +667,35 @@ async def _let_the_closing_line_finish(session) -> None:
     for 499 rupees, thank you". On a call where they had just agreed to pay, the
     last thing they heard was the line going dead.
 
-    Both waits are bounded. A closing line that never arrives, or never ends,
+    The in-flight line has to be let go first. A terminal transition is decided
+    *while the agent is still speaking* the turn that carried it -- on
+    voice_call 31 that was "ठीक है, मैं आपको पेमेंट लिंक भेज रहा हूँ" -- so
+    `speaking` is already set when this is called. Waiting on it returned
+    immediately, the next wait caught the end of that same sentence, and the
+    call hung up before the closing line had even been generated. The customer
+    agreed to pay, the link went out, and the line went dead with no goodbye.
+
+    So: let the current utterance finish, then wait for the *next* one. The
+    closing line needs a Vertex round trip before it can start, which is ample
+    room between the two waits.
+
+    Every wait is bounded. A closing line that never arrives, or never ends,
     must not keep a customer on a call that is over.
     """
+    if session.speaking.is_set():
+        try:
+            await asyncio.wait_for(
+                session.stopped_speaking.wait(), timeout=CLOSING_TOTAL_TIMEOUT
+            )
+        except TimeoutError:
+            logger.warning("the turn that ended the call never stopped playing; ending")
+            return
+
+    # Re-arm, so the next wait catches the closing line rather than the one
+    # that just finished.
+    session.speaking.clear()
+    session.stopped_speaking.clear()
+
     try:
         await asyncio.wait_for(session.speaking.wait(), timeout=CLOSING_START_TIMEOUT)
     except TimeoutError:
@@ -682,6 +711,26 @@ async def _let_the_closing_line_finish(session) -> None:
         return
 
     await asyncio.sleep(CLOSING_GRACE)
+
+
+class AnnouncementFilter(FrameProcessor):
+    """Drops transcripts that are the network talking, not the customer.
+
+    Sits between STT and the user aggregator, so an announcement never becomes
+    a conversation turn at all -- rather than being seen and then reasoned
+    about, which is how it satisfied the identity gate on voice_call 31.
+    """
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+
+        if isinstance(frame, (TranscriptionFrame, InterimTranscriptionFrame)):
+            if is_carrier_announcement(frame.text):
+                logger.info("dropped a carrier announcement: %r", frame.text[:60])
+                return
+
+        await self.push_frame(frame, direction)
+
 
 class SpeechWatcher(FrameProcessor):
     """Tracks whether the agent is currently speaking.
@@ -1347,6 +1396,7 @@ async def _run_pipeline(session, transport, stt, llm, tts, aggregators) -> Dunni
     processors = [
         transport.input(),
         stt,
+        AnnouncementFilter(),
         aggregators.user(),
         llm,
         tts,
