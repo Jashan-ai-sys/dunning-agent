@@ -465,9 +465,11 @@ instance that cannot reach Cloud SQL.
       invoice correlation, case creation, audit trail
 - [x] **Phase 2** — Policy engine, orchestrator, stopping rules, contact-window
       compliance, replay sweep
-- [~] **Phase 3** — Conversation graph, intent model, `voice_calls`, post-call
-      outcome handling **done**; the LiveKit runtime that walks the graph and
-      the SIP dispatch are **not**
+- [x] **Phase 3** — Conversation graph, intent model, `voice_calls`, post-call
+      outcome handling, and the runtime that walks the graph on a real phone
+      call. Live on Twilio Media Streams over Pipecat, in Hindi, with the
+      payment link sent mid-call as an MCP tool. The older LiveKit path in
+      `app/voice/agent.py` predates it and is not what production runs
 - [x] **Phase 4** — Razorpay Payment Links for the `retry_now` intent, dual-key
       recovery attribution
 - [x] **Phase 5** — Batch metrics: cases, ₹ at risk, ₹ recovered, recovery rate
@@ -483,11 +485,48 @@ instance that cannot reach Cloud SQL.
   intake and recovery on one side, the voice pipeline on the other, the two
   seams between them, and the VAD/STT settings with the reasoning behind each.
 
+- [The conversation graph](docs/conversation-graph.md) — every node and edge,
+  the three properties the shape enforces, why the model picks an edge *label*
+  rather than a destination, and how the intent is a property of where the
+  conversation ended rather than something the model wrote down.
+
 - [Fully local voice stack](docs/local-voice-architecture.md) — the proposed
   self-hosted STT/LLM/TTS design, why the entity-dense ASR gap matters more
   than headline WER, and what it would cost to close it. Proposed, not built.
 
 ## Known gaps
+
+- **A silent mandate failure has no webhook, and nothing detects it.** A
+  mandate registration authorises as a zero-amount eMandate payment; if it
+  worked, `subscription.authenticated` follows, and if it did not, nothing
+  follows. Razorpay signals the failure by omission. That combination is the
+  most valuable signal here and the easiest to miss — money arrived, every
+  dashboard looks healthy, and every future charge on that subscription is
+  already broken, which is exactly tier 1. Both events are now recorded so the
+  absence is *detectable*; noticing it needs a reconciliation sweep, which is
+  not built.
+
+- **A zero-amount mandate registration opens a case it should not.** That
+  failure arrives as `payment.failed` with `amount=0` and no invoice, so it
+  routes to the checkout path and opens a recovery case for a debt that does
+  not exist. The `min_recoverable_amount_paise` floor stops it being worked, so
+  nobody is contacted — but the row should not be created. A zero-amount guard
+  in `_open_checkout_case` is the fix.
+
+- **STT can go quiet mid-call and nothing notices.** On one call Sarvam
+  returned a single transcript and then stopped; the socket closed thirty
+  seconds later. Turn detection still fired, so the pipeline believed the
+  customer had spoken while the words never arrived, and the agent simply
+  waited. Keepalives are configured and did not prevent it. There is no
+  detection and no fallback.
+
+- **The stored transcript misses the closing line.** `finalise()` writes the
+  outcome while the closing line is still playing — deliberately, so a pipeline
+  that dies during teardown cannot lose the one thing the call was for. The
+  consequence is that the last turn or two are absent from
+  `voice_calls.transcript` even though the customer heard them. The audit trail
+  is complete for the outcome; the transcript is not complete for the
+  conversation.
 
 - **A customer who was mid-payment gets no grace period.** An abandoned
   checkout waits `checkout_grace_minutes` (30) before we chase it, on the

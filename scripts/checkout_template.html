@@ -1,67 +1,105 @@
 <!doctype html>
 <meta charset="utf-8">
-<title>Authorise subscription — dunning demo</title>
+<title>__COMPANY__ — subscription authorisation</title>
 <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
 <style>
-  body { font: 15px/1.6 system-ui, sans-serif; margin: 0; background: #0e0f13; color: #e8e8ea; }
-  main { max-width: 620px; margin: 0 auto; padding: 36px 24px; }
-  h1 { font-size: 19px; margin: 0 0 4px; }
-  .sub { color: #8b8d98; font-size: 13px; margin-bottom: 26px; }
-  button { font: inherit; padding: 11px 22px; border: 0; border-radius: 6px;
-           background: #3b82f6; color: #fff; cursor: pointer; }
-  button:disabled { background: #2a2d36; color: #6b6d78; cursor: default; }
-  .card { background: #16181f; border-radius: 8px; padding: 14px 16px; margin: 18px 0; }
-  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
-             color: #8b8d98; margin: 0 0 8px; }
-  code { background: #1c1f27; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
-  ol { padding-left: 20px; } li { margin-bottom: 7px; }
-  .warn { border-left: 3px solid #f59e0b; padding-left: 12px; color: #fbbf24; }
-  #out { margin-top: 18px; padding: 12px 14px; border-radius: 6px; background: #16181f;
-         border-left: 3px solid #3b82f6; white-space: pre-wrap; font-size: 13px; }
+  :root {
+    --ink: #0f1115; --panel: #171a21; --line: #262b35;
+    --text: #e9ebef; --muted: #8d92a0; --accent: #3b82f6; --warn: #f59e0b;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--ink); color: var(--text);
+    font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; align-items: center; justify-content: center; min-height: 100vh;
+  }
+  main { width: 100%; max-width: 520px; padding: 32px 24px; }
+
+  .badge {
+    display: inline-block; font-size: 11px; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--warn);
+    border: 1px solid var(--warn); border-radius: 3px;
+    padding: 3px 8px; margin-bottom: 18px;
+  }
+  h1 { font-size: 26px; line-height: 1.15; margin: 0 0 6px; letter-spacing: -.01em; }
+  .lede { color: var(--muted); margin: 0 0 26px; font-size: 15px; }
+
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 4px 20px; margin-bottom: 22px;
+  }
+  .row {
+    display: flex; justify-content: space-between; align-items: baseline;
+    gap: 16px; padding: 13px 0; border-bottom: 1px solid var(--line);
+  }
+  .row:last-child { border-bottom: 0; }
+  .row .k { color: var(--muted); font-size: 13px; }
+  .row .v { font-variant-numeric: tabular-nums; text-align: right; }
+  .row .v.mono {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px;
+  }
+  .amount { font-size: 22px; font-weight: 600; }
+
+  button {
+    width: 100%; font: inherit; font-weight: 600; padding: 15px 22px;
+    border: 0; border-radius: 8px; background: var(--accent); color: #fff;
+    cursor: pointer; letter-spacing: .01em;
+  }
+  button:hover { background: #2f74e8; }
+  button:disabled { background: #232733; color: #6b7080; cursor: default; }
+
+  #out {
+    margin-top: 18px; padding: 13px 15px; border-radius: 8px;
+    background: var(--panel); border-left: 3px solid var(--line);
+    white-space: pre-wrap; font-size: 13px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; color: var(--muted);
+  }
+  #out.ok   { border-left-color: #34d399; color: var(--text); }
+  #out.fail { border-left-color: #f87171; color: var(--text); }
+
+  details { margin-top: 22px; color: var(--muted); font-size: 13.5px; }
+  summary { cursor: pointer; user-select: none; }
+  details p { margin: 10px 0 0; }
+  code {
+    background: #1d212a; padding: 2px 6px; border-radius: 4px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12.5px;
+  }
 </style>
+
 <main>
-  <h1>Authorise the demo subscription</h1>
-  <div class="sub">__SUBSCRIPTION__ &middot; &#8377;__AMOUNT__</div>
+  <span class="badge">Razorpay test mode</span>
+  <h1>__COMPANY__</h1>
+  <p class="lede">Authorise the recurring mandate. No money moves — these are
+    test-mode keys.</p>
 
-  <div class="card">
-    <h2>Step 1 &mdash; authorise once (this should SUCCEED)</h2>
-    <p><strong>Skip cards.</strong> Test cards keep getting refused here:
-      <code>4111&nbsp;1111&nbsp;1111&nbsp;1111</code> is
-      <em>"not eligible for recurring payments"</em>, and
-      <code>5104&nbsp;0155&nbsp;5555&nbsp;5558</code> is
-      <em>"international cards are not supported"</em>. Which domestic cards are
-      recurring-eligible varies by account, so it is not worth hunting.</p>
-    <ol>
-      <li>Pick <strong>UPI</strong> in the left-hand menu and enter
-        <code>success@razorpay</code>.</li>
-      <li>If UPI is not offered, pick <strong>EMandate</strong> and choose any
-        test bank.</li>
-    </ol>
-    <p class="warn">Razorpay documents <code>success@razorpay</code> for one-time
-      payments and does not explicitly confirm it for Autopay mandates &mdash; try it,
-      but fall back to EMandate rather than spending the evening on this.</p>
+  <div class="panel">
+    <div class="row"><span class="k">Amount</span><span class="v amount">&#8377;__AMOUNT__</span></div>
+    <div class="row"><span class="k">Customer</span><span class="v">__NAME__</span></div>
+    <div class="row"><span class="k">Mobile</span><span class="v mono">__CONTACT__</span></div>
+    <div class="row"><span class="k">Subscription</span><span class="v mono">__SUBSCRIPTION__</span></div>
   </div>
 
-  <div class="card">
-    <h2>Step 2 &mdash; fail the charge, on demand</h2>
-    <p>Do <strong>not</strong> fight with OTPs. Razorpay test mode can fire a charge
-      whenever you want and let you pick the outcome:</p>
-    <ol>
-      <li>Razorpay Dashboard &rarr; <strong>Subscriptions</strong> &rarr; open this subscription.</li>
-      <li>Click <strong>&ldquo;Charge this now&rdquo;</strong>.</li>
-      <li>Choose <strong>failure</strong> when it asks for the result.</li>
-    </ol>
-    <p class="warn">That fires a genuine <code>payment.failed</code> with a real
-      <code>invoice_id</code>, moves the subscription to <code>pending</code>, and opens
-      a recovery case by itself &mdash; no timing games, repeatable for a retake.</p>
-  </div>
+  <button id="go">Authorise &#8377;__AMOUNT__ subscription</button>
+  <div id="out">Ready.</div>
 
-  <button id="go">Open Razorpay Checkout</button>
-  <div id="out">Not started.</div>
+  <details>
+    <summary>What happens after this</summary>
+    <p>Once the mandate is live, Razorpay Dashboard &rarr; Subscriptions &rarr;
+      <strong>Charge this now</strong> &rarr; <strong>Failure</strong> fires a genuine
+      <code>payment.failed</code> carrying a real <code>invoice_id</code>. That reaches
+      the webhook endpoint, resolves to a subscription and customer, and opens a
+      recovery case. Repeatable, so a retake costs nothing.</p>
+    <p><strong>Card mandates fail on this account.</strong> Every authorisation returns
+      <code>SERVER_ERROR</code> with <code>error_source: internal</code> at
+      <code>card_mandate_process</code>, using Razorpay's own documented subscription
+      test card. UPI recurring is disabled account-wide. eMandate is the only rail
+      that registers, so the card option is switched off below.</p>
+  </details>
 </main>
+
 <script>
   const out = document.getElementById("out");
-  const say = (t) => { out.textContent = t; };
+  const say = (text, cls) => { out.textContent = text; out.className = cls || ""; };
 
   document.getElementById("go").onclick = () => {
     const rzp = new Razorpay({
@@ -70,27 +108,23 @@
       name: "__COMPANY__",
       description: "Subscription authorisation (test mode)",
       prefill: { name: "__NAME__", email: "__EMAIL__", contact: "__CONTACT__" },
+      // Card mandates fail on this account: every authorisation returns
+      // SERVER_ERROR with error_source 'internal' at card_mandate_process,
+      // using Razorpay's own documented test card. eMandate is enabled --
+      // /methods reports 298 banks -- so skip the card rail entirely.
+      method: { card: false, upi: false, wallet: false, emi: false,
+                paylater: false, netbanking: true, emandate: true },
       theme: { color: "#3b82f6" },
       handler: (r) => say(
-        "Authorised.\npayment_id: " + (r.razorpay_payment_id || "-") +
-        "\nsubscription_id: " + (r.razorpay_subscription_id || "-") +
-        "\n\nIf you entered a short OTP the charge failed instead — that is what we want."
-      ),
-      modal: { ondismiss: () => say("Checkout closed without completing.") },
+        "Authorised.\npayment_id:      " + (r.razorpay_payment_id || "-") +
+        "\nsubscription_id: " + (r.razorpay_subscription_id || "-"), "ok"),
+      modal: { ondismiss: () => say("Checkout closed without authorising.") }
     });
-
-    rzp.on("payment.failed", (e) => {
-      const err = (e && e.error) || {};
-      say(
-        "Payment FAILED — this is the good outcome.\n" +
-        "code: " + (err.code || "-") + "\n" +
-        "reason: " + (err.description || "-") + "\n" +
-        "payment_id: " + ((err.metadata && err.metadata.payment_id) || "-") +
-        "\n\nRazorpay is now firing payment.failed at the webhook endpoint."
-      );
-    });
-
-    say("Opening checkout…");
+    rzp.on("payment.failed", (e) => say(
+      "Failed.\ncode:   " + (e.error && e.error.code) +
+      "\nstep:   " + (e.error && e.error.step) +
+      "\nreason: " + (e.error && e.error.description), "fail"));
+    say("Checkout open…");
     rzp.open();
   };
 </script>
