@@ -54,3 +54,29 @@ def test_one_half_of_the_phrase_is_not_enough():
     assert is_carrier_announcement("मुझे कॉल मत करना।") is False       # "call", no "recorded"
     assert is_carrier_announcement("मेरा रिकॉर्ड ठीक है।") is False     # "record", no "call"
     assert is_carrier_announcement("Please don't call me again.") is False
+
+
+# -- a question is not a denial ---------------------------------------------
+
+def test_asking_who_is_calling_is_not_a_wrong_number():
+    """On voice_call 34 the customer asked "सॉरी, कहाँ से बात कर रहे हो?" and the
+    model took `not_the_customer`, ending the call in 15 seconds with a false
+    `wrong_number` outcome. Someone checking who they are speaking to has not
+    said they are the wrong person."""
+    from app.voice.flow import GREET
+
+    edge = next(e for e in GREET.edges if e.label == "not_the_customer")
+    assert "QUESTION is not a denial" in edge.condition
+    assert "where are you calling from" in edge.condition
+    # And it must still catch the case it exists for.
+    assert "wrong number" in edge.condition
+
+
+def test_the_agent_sends_the_link_not_the_customer():
+    """On voice_call 35 the customer asked what they had to do and was told
+    "आपको पेमेंट के लिए एक नया लिंक भेजना होगा" -- that they had to send a link.
+    The direction is backwards and the offer is two stages early."""
+    from app.voice.flow import EXPLAIN
+
+    assert "do NOT tell them to send anything" in EXPLAIN.prompt
+    assert "You send the link, they receive it" in EXPLAIN.prompt

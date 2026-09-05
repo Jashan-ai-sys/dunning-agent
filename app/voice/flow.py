@@ -120,7 +120,11 @@ GREET = Node(
             label="not_the_customer",
             condition=(
                 "The person says this is the wrong number, that they are someone else, "
-                "or that they do not know the customer."
+                "or that they do not know the customer. A QUESTION is not a denial: "
+                "'who is this', 'where are you calling from', 'what is this about' "
+                "are people checking who they are talking to, and they still need "
+                "answering. Only take this label when they say the person you asked "
+                "for is not them and not reachable here."
             ),
             speech="माफ़ कीजिए, मैं नंबर की जाँच करवा लेता हूँ।",
         ),
@@ -134,7 +138,11 @@ EXPLAIN = Node(
         "Tell them their subscription payment of {amount_spoken} did not go "
         "through. If it helps, mention the reason: {failure_reason}. Be matter of "
         "fact, not accusatory -- most failures are bank-side, not the customer's "
-        "fault.\n\n{halt_note}\n\nThen pause for their reaction."
+        "fault.\n\n{halt_note}\n\nThen pause for their reaction.\n\n"
+        "If they ask what they have to do, do NOT tell them to send anything. "
+        "You send the link, they receive it. Say that you will sort it out and "
+        "move on -- the next stage asks about the reason, and the one after that "
+        "offers the options."
     ),
     edges=(
         Edge(
