@@ -432,9 +432,73 @@ async def _record_recovery(
     )
 
 
+
+async def handle_payment_authorized(
+    session: AsyncSession, event: dict[str, Any], client: RazorpayClient
+) -> None:
+    """A payment succeeded but has not been captured.
+
+    Subscribed to for one signal in particular: a zero-amount eMandate
+    registration. That is not a debt and must never open a recovery case --
+    nothing is owed, the customer paid nothing, and there is nothing to chase.
+    It is recorded and nothing else happens here.
+
+    What makes it worth recording is what it means when the *next* event does
+    not arrive. A mandate registration that authorises and is never followed by
+    ``subscription.authenticated`` has failed silently: the money side looks
+    perfect, and every future charge on that subscription is already broken.
+    Razorpay signals that by omission -- there is no "mandate failed" webhook --
+    so the only way to catch it is to notice the absence, which needs a sweep
+    rather than a handler. See `Known gaps`.
+    """
+    payment = event["payload"]["payment"]["entity"]
+    await upsert_payment(session, payment)
+
+    if payment.get("amount") == 0 and payment.get("method") == "emandate":
+        logger.info(
+            "mandate registration authorised: payment %s token %s -- expecting "
+            "subscription.authenticated to follow",
+            payment["id"],
+            payment.get("token_id"),
+        )
+        return
+
+    logger.info("payment %s authorised (not captured); recorded, no case", payment["id"])
+
+
+async def handle_subscription_authenticated(
+    session: AsyncSession, event: dict[str, Any], client: RazorpayClient
+) -> None:
+    """The mandate registered and the subscription is live.
+
+    The counterpart to the zero-amount authorisation above: this is the event
+    whose *absence* means a silent mandate failure. Recording it is what makes
+    that absence detectable later.
+
+    It also attaches the customer. Until a subscription authenticates there is
+    no customer on it, which is why a failed authorisation opens a case with no
+    contact details and the policy correctly stops it.
+    """
+    subscription = event["payload"]["subscription"]["entity"]
+    await upsert_subscription(session, subscription)
+
+    customer_id = subscription.get("customer_id")
+    if customer_id:
+        await _ensure_customer(session, client, customer_id)
+
+    logger.info(
+        "subscription %s authenticated (customer %s); mandate is live",
+        subscription["id"],
+        customer_id,
+    )
+
+
+
 EVENT_HANDLERS: dict[str, Handler] = {
     "payment.failed": handle_payment_failed,
+    "payment.authorized": handle_payment_authorized,
     "payment.captured": handle_payment_captured,
+    "subscription.authenticated": handle_subscription_authenticated,
     "subscription.pending": handle_subscription_pending,
     "subscription.halted": handle_subscription_halted,
     "subscription.charged": handle_subscription_charged,
