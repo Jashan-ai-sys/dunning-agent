@@ -32,7 +32,10 @@ from pipecat.audio.turn.smart_turn.base_smart_turn import SmartTurnParams
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.audio.vad.vad_analyzer import VADParams
 from pipecat.frames.frames import (
+    BotStartedSpeakingFrame,
+    BotStoppedSpeakingFrame,
     EndFrame,
+    Frame,
     FunctionCallResultProperties,
     LLMRunFrame,
     TTSSpeakFrame,
@@ -45,6 +48,7 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMContextAggregatorPair,
     LLMUserAggregatorParams,
 )
+from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 from pipecat.services.cartesia.tts import CartesiaTTSService
@@ -637,6 +641,78 @@ def build_turn_strategies() -> UserTurnStrategies:
     )
 
 
+
+
+#: The closing line is generated only after the graph reaches a terminal node:
+#: a Vertex round trip, then TTS, then several seconds of speech. It has to be
+#: given time to start before we can sensibly wait for it to end.
+CLOSING_START_TIMEOUT = 4.0
+#: And a ceiling on the whole thing, so a TTS failure cannot hold the line open
+#: on a customer who has already been told everything they need.
+CLOSING_TOTAL_TIMEOUT = 20.0
+#: A little air after the last audio frame. Hanging up on the final syllable
+#: reads as a dropped call rather than a finished one.
+CLOSING_GRACE = 0.6
+
+
+async def _let_the_closing_line_finish(session) -> None:
+    """Hold the line until the agent has actually stopped speaking.
+
+    This used to be `sleep(2.0)`, which was a guess, and a wrong one: the
+    closing turn is produced *after* the terminal transition, so two seconds cut
+    the customer off about a second into "I am sending you a secure payment link
+    for 499 rupees, thank you". On a call where they had just agreed to pay, the
+    last thing they heard was the line going dead.
+
+    Both waits are bounded. A closing line that never arrives, or never ends,
+    must not keep a customer on a call that is over.
+    """
+    try:
+        await asyncio.wait_for(session.speaking.wait(), timeout=CLOSING_START_TIMEOUT)
+    except TimeoutError:
+        logger.info("no closing line began within %.1fs; ending the call", CLOSING_START_TIMEOUT)
+        return
+
+    try:
+        await asyncio.wait_for(session.stopped_speaking.wait(), timeout=CLOSING_TOTAL_TIMEOUT)
+    except TimeoutError:
+        logger.warning(
+            "closing line still playing after %.0fs; ending anyway", CLOSING_TOTAL_TIMEOUT
+        )
+        return
+
+    await asyncio.sleep(CLOSING_GRACE)
+
+class SpeechWatcher(FrameProcessor):
+    """Tracks whether the agent is currently speaking.
+
+    Exists because the call used to end on a fixed `sleep(2.0)` after the graph
+    reached a terminal node. The closing line is generated *after* that
+    transition -- a Vertex round trip, then TTS, then several seconds of Hindi
+    -- so two seconds cut the customer off roughly a second into "I am sending
+    you a secure payment link for 499 rupees, thank you". They heard the call
+    drop mid-sentence, immediately after agreeing to pay.
+
+    Placed after `transport.output()`, so the frames it watches describe audio
+    that has actually gone to the caller rather than audio that has merely been
+    synthesised.
+    """
+
+    def __init__(self, session) -> None:
+        super().__init__()
+        self._session = session
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection) -> None:
+        await super().process_frame(frame, direction)
+        if isinstance(frame, BotStartedSpeakingFrame):
+            self._session.speaking.set()
+            self._session.stopped_speaking.clear()
+        elif isinstance(frame, BotStoppedSpeakingFrame):
+            self._session.speaking.clear()
+            self._session.stopped_speaking.set()
+        await self.push_frame(frame, direction)
+
+
 class DunningSession:
     """One call: the graph, the context, and the tool that moves between nodes."""
 
@@ -658,6 +734,10 @@ class DunningSession:
         opening.append(self._stage_message())
         self.llm_context.set_messages(opening)
         self.finished = asyncio.Event()
+        #: Set while the agent is speaking, cleared when it stops. Read at the
+        #: end of the call so the closing line is not cut off mid-sentence.
+        self.speaking = asyncio.Event()
+        self.stopped_speaking = asyncio.Event()
         self.recovery_case_id: int | None = context.get("_recovery_case_id")
         self.amount_paise: int | None = context.get("_amount_paise")
         self.voice_call_id: int | None = None
@@ -1271,6 +1351,7 @@ async def _run_pipeline(session, transport, stt, llm, tts, aggregators) -> Dunni
         llm,
         tts,
         transport.output(),
+        SpeechWatcher(session),
         aggregators.assistant(),
     ]
 
@@ -1327,7 +1408,7 @@ async def _run_pipeline(session, transport, stt, llm, tts, aggregators) -> Dunni
         # the customer nothing, and a pipeline that dies during teardown would
         # otherwise lose the one thing the call was for.
         await session.finalise()
-        await asyncio.sleep(2.0)
+        await _let_the_closing_line_finish(session)
         await task.queue_frame(EndFrame())
 
     watcher = asyncio.create_task(_end_when_finished())
